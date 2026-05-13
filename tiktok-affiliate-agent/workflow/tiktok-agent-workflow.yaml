@@ -1,0 +1,144 @@
+name: tiktok_affiliate_content_agent
+version: 1
+language: th
+schedule:
+  cadence: daily
+  recommended_start_time: "09:00"
+
+inputs:
+  tiktok_account: data/tiktok_account.json
+  brand_profile: data/brand_profile.json
+  product_catalog: data/products.csv
+  revenue_target: data/revenue_targets.json
+  daily_goal:
+    type: string
+    default: "สร้างคอมมิชชันจาก TikTok Shop Affiliate ให้เข้าใกล้ 30,000 บาทต่อสัปดาห์"
+
+outputs:
+  daily_plan_markdown: outputs/<date>/daily-content-plan.md
+  posting_queue_csv: outputs/<date>/posting_queue.csv
+
+state:
+  target_account: "บัญชี TikTok ที่ใช้โพสต์และเก็บผลลัพธ์"
+  content_queue: "ไอเดียและคลิปที่รอโพสต์"
+  product_memory: "สินค้าที่เคยทำแล้วและผลลัพธ์"
+  analytics_memory: "ยอดวิว กดตะกร้า CTR ยอดขาย และคอมมิชชัน"
+  revenue_dashboard: "เป้ารายวัน ยอดจริง ส่วนต่าง และจำนวนออเดอร์ที่ต้องเร่ง"
+
+agents:
+  - id: product_scout
+    role: "เลือกสินค้าที่ควรทำวันนี้"
+    input:
+      - product_catalog
+      - daily_goal
+      - revenue_target
+    output:
+      - ranked_products
+    rules:
+      - "ให้คะแนนจากรีวิว คอมมิชชัน ราคา ความชัดของ pain point และสถานะสินค้า"
+      - "ให้คะแนนเพิ่มกับสินค้าที่คอมมิชชันต่อออเดอร์สูงพอจะช่วยให้ถึงเป้า 30,000 บาทต่อสัปดาห์"
+      - "เลือก mix ระหว่างสินค้าขายง่ายและสินค้าคอมมิชชันสูง"
+      - "ตัดสินค้าที่ไม่มีสต็อกออก"
+
+  - id: revenue_planner
+    role: "แตกเป้ารายได้ 30,000 บาทต่อสัปดาห์เป็นเป้ารายวันและเป้าต่อคลิป"
+    input:
+      - revenue_target
+      - ranked_products
+      - yesterday_metrics
+    output:
+      - daily_commission_gap
+      - target_orders_by_product
+      - content_volume_needed
+    rules:
+      - "คำนวณจากคอมมิชชันจริงต่อออเดอร์ ไม่ใช่ยอดขายรวม"
+      - "ถ้าคอมมิชชันเฉลี่ยต่ำกว่า 30 บาทต่อออเดอร์ ให้แนะนำเพิ่มสินค้าคอมมิชชันสูง"
+      - "ถ้ายอดกดตะกร้าดีแต่ยอดขายต่ำ ให้แนะนำเปลี่ยนสินค้า ราคา หรือ offer"
+
+  - id: content_idea_agent
+    role: "คิด angle และ hook"
+    prompt_file: prompts/content_idea_agent.md
+    input:
+      - ranked_products
+      - brand_profile
+    output:
+      - content_angles
+      - opening_hooks
+
+  - id: script_agent
+    role: "เขียนสคริปต์วิดีโอสั้น"
+    prompt_file: prompts/script_agent.md
+    input:
+      - content_angles
+      - product_details
+    output:
+      - voiceover_script
+      - on_screen_text
+      - call_to_action
+
+  - id: video_agent
+    role: "วางแผนสร้างวิดีโอ"
+    prompt_file: prompts/video_agent.md
+    input:
+      - voiceover_script
+      - product_details
+    output:
+      - shot_list
+      - b_roll_list
+      - edit_notes
+
+  - id: publisher_agent
+    role: "เตรียมโพสต์และคิวโพสต์"
+    prompt_file: prompts/publisher_agent.md
+    input:
+      - tiktok_account
+      - final_video
+      - affiliate_link
+      - caption
+    output:
+      - posting_queue
+      - caption
+      - hashtags
+    human_approval_required: true
+    approval_checklist:
+      - "บัญชีโพสต์ถูกต้อง"
+      - "ราคาและโปรโมชันถูกต้อง"
+      - "ลิงก์ตะกร้าถูกสินค้า"
+      - "ไม่มีคำเคลมเกินจริง"
+      - "ดูวิดีโอก่อนโพสต์แล้ว"
+
+  - id: analytics_agent
+    role: "วิเคราะห์ผลและปรับแผนวันถัดไป"
+    prompt_file: prompts/analytics_agent.md
+    input:
+      - yesterday_metrics
+      - content_queue
+    output:
+      - lessons
+      - next_day_adjustments
+      - revenue_gap_actions
+
+automation_boundaries:
+  can_automate_now:
+    - "คำนวณ gap รายได้เทียบเป้า 30,000 บาทต่อสัปดาห์"
+    - "เลือกสินค้า"
+    - "คิดไอเดีย"
+    - "เขียนสคริปต์"
+    - "ทำ shot list"
+    - "เตรียม caption และ hashtag"
+    - "สร้าง posting queue"
+  needs_integration:
+    - "OAuth authorization สำหรับบัญชี @thatslife6969"
+    - "Login Kit"
+    - "TikTok Content Posting API"
+    - "video.upload scope สำหรับส่ง draft เข้า inbox"
+    - "video.publish scope สำหรับ Direct Post"
+    - "สร้างวิดีโอด้วยเครื่องมือภายนอก"
+    - "อัปโหลดวิดีโอเข้าบัญชี TikTok"
+    - "ดึง analytics จาก TikTok Shop"
+    - "ดึงยอดคอมมิชชันจริงจาก TikTok Shop Affiliate"
+  needs_human_approval:
+    - "Authorize บัญชี TikTok"
+    - "โพสต์จริง"
+    - "แก้ไขราคา/โปรโมชัน"
+    - "ใช้คำเคลมสุขภาพหรือความงาม"

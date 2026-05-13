@@ -1,0 +1,47 @@
+{
+  "weekly_commission_target_thb": 30000,
+  "daily_commission_target_thb": 4286,
+  "target_days_per_week": 7,
+  "content_volume": {
+    "minimum_clips_per_day": 4,
+    "stretch_clips_per_day": 6,
+    "minimum_clips_per_week": 35,
+    "live_sessions_per_week": 3
+  },
+  "commission_scenarios": [
+    {
+      "average_commission_per_order_thb": 30,
+      "orders_needed_per_week": 1000,
+      "orders_needed_per_day": 143
+    },
+    {
+      "average_commission_per_order_thb": 50,
+      "orders_needed_per_week": 600,
+      "orders_needed_per_day": 86
+    },
+    {
+      "average_commission_per_order_thb": 80,
+      "orders_needed_per_week": 375,
+      "orders_needed_per_day": 54
+    },
+    {
+      "average_commission_per_order_thb": 120,
+      "orders_needed_per_week": 250,
+      "orders_needed_per_day": 36
+    }
+  ],
+  "daily_operating_targets": {
+    "minimum_product_tests": 5,
+    "minimum_hooks_tested": 8,
+    "minimum_posts": 4,
+    "review_times": ["12:00", "18:00", "23:00"]
+  },
+  "decision_rules": [
+    "ถ้าคอมมิชชันต่อออเดอร์ต่ำกว่า 30 บาท ให้ใช้สินค้าเป็น traffic product เท่านั้น",
+    "ถ้าสินค้ามีคอมมิชชัน 50 บาทขึ้นไปและ CTR ดี ให้ทำซ้ำอย่างน้อย 3 angle",
+    "ถ้าคลิปวิวดีแต่กดตะกร้าต่ำ ให้เปลี่ยน hook และ CTA",
+    "ถ้ากดตะกร้าดีแต่ยอดขายต่ำ ให้เปลี่ยนสินค้า ราคา offer หรือรีวิวความน่าเชื่อถือ",
+    "ทุกวันต้องมีอย่างน้อย 1 คลิปสำหรับสินค้าคอมมิชชันสูง"
+  ]
+}
+

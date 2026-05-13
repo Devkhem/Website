@@ -1,0 +1,46 @@
+{
+  "brand_name": "Daily Basket Affiliate",
+  "language": "th",
+  "market": "Thailand",
+  "goal": "สร้างคอมมิชชันจาก TikTok Shop Affiliate ให้ถึง 30,000 บาทต่อสัปดาห์ ด้วยคอนเทนต์สั้นที่น่าเชื่อถือและทำซ้ำได้ทุกวัน",
+  "weekly_revenue_target_thb": 30000,
+  "daily_revenue_target_thb": 4286,
+  "target_strategy": {
+    "primary_metric": "commission_thb",
+    "daily_minimum_content": 4,
+    "weekly_minimum_content": 35,
+    "preferred_commission_per_order_thb": 50,
+    "minimum_commission_per_order_thb": 30,
+    "target_orders_per_day_if_50_thb_commission": 86,
+    "target_orders_per_week_if_50_thb_commission": 600
+  },
+  "target_audience": [
+    "วัยทำงานที่อยากได้ของใช้คุ้มราคา",
+    "คนที่ชอบดูรีวิวก่อนซื้อ",
+    "ผู้เริ่มต้นดูแลสุขภาพ บ้าน และไลฟ์สไตล์"
+  ],
+  "tone": [
+    "เป็นกันเอง",
+    "จริงใจ",
+    "ไม่ขายแข็ง",
+    "บอกข้อดีและข้อควรระวังแบบตรงไปตรงมา"
+  ],
+  "content_pillars": [
+    "รีวิวจากปัญหาจริง",
+    "ของใช้แก้ปัญหาในชีวิตประจำวัน",
+    "เปรียบเทียบก่อนซื้อ",
+    "ลองใช้ให้ดู",
+    "ของคุ้มราคาที่คนซื้อซ้ำ"
+  ],
+  "posting_windows": [
+    "07:00-09:00",
+    "12:00-13:00",
+    "19:00-22:00"
+  ],
+  "approval_rules": [
+    "ตรวจราคากับลิงก์สินค้าอีกครั้งก่อนโพสต์",
+    "ห้ามเคลมผลลัพธ์เกินจริง",
+    "สินค้าเกี่ยวกับสุขภาพหรือความงามต้องใช้คำว่า อาจช่วย, เหมาะกับ, จากประสบการณ์ส่วนตัว",
+    "ต้องดูตัวอย่างวิดีโอก่อนเผยแพร่จริง"
+  ]
+}

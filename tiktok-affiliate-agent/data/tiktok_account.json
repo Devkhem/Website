@@ -1,0 +1,48 @@
+{
+  "handle": "@thatslife6969",
+  "profile_url": "https://www.tiktok.com/@thatslife6969",
+  "connection_status": "workflow_connected",
+  "posting_status": "not_connected",
+  "role": "target_creator_account",
+  "notes": [
+    "บัญชีนี้ถูกตั้งเป็นเพจเป้าหมายสำหรับวางแผนคอนเทนต์และ posting queue แล้ว",
+    "ยังไม่ได้เชื่อม OAuth หรือสิทธิ์โพสต์จริง",
+    "ก่อนโพสต์จริงต้องให้เจ้าของบัญชี authorize และอนุมัติวิดีโอ"
+  ],
+  "required_for_direct_posting": [
+    "TikTok Developer app",
+    "Login Kit/OAuth configuration",
+    "Content Posting API product",
+    "Direct Post configuration",
+    "Approved video.upload scope for draft upload",
+    "Approved video.publish scope",
+    "OAuth authorization from @thatslife6969",
+    "User access token",
+    "Human approval before publishing"
+  ],
+  "default_post_settings": {
+    "privacy_level": "PUBLIC_TO_EVERYONE",
+    "disable_duet": false,
+    "disable_comment": false,
+    "disable_stitch": false,
+    "brand_content_toggle": true,
+    "brand_organic_toggle": false,
+    "is_aigc": true
+  },
+  "developer_portal": {
+    "url": "https://developers.tiktok.com/",
+    "app_url": "https://developers.tiktok.com/app/7639043122118690837/pending",
+    "app_id": "7639043122118690837",
+    "app_status": "pending",
+    "site_verification": {
+      "method": "dns_txt_or_url_prefix_signature_file",
+      "token": "tiktok-developers-site-verification=NXqfMa78DDVE3kfChv83eL0tFQQ8Y3p6",
+      "local_signature_file": "public/tiktok-developers-site-verification.txt",
+      "netlify_site_url": "https://spontaneous-conkies-a04ee3.netlify.app",
+      "verification_url": "https://spontaneous-conkies-a04ee3.netlify.app/tiktok-developers-site-verification.txt"
+    },
+    "recommended_first_mode": "draft",
+    "env_template": ".env.example",
+    "readiness_check": "python3 scripts/check_tiktok_connection.py"
+  }
+}
