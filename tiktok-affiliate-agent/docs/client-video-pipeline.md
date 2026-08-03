@@ -79,7 +79,8 @@ python3 scripts/run_client_pipeline.py new --responses ~/Downloads/form.csv --jo
 python3 scripts/run_client_pipeline.py --jobs ~/"Google Drive/My Drive/clients" new --responses ~/Downloads/form.csv
 ```
 
-ค่าเริ่มต้นคือ `outputs/clients/<วันที่>-<ชื่อลูกค้า>/`
+ค่าเริ่มต้นคือ `outputs/clients/<วันที่>-<ชื่อลูกค้า>/` ซึ่งถูก ignore ไว้ใน `.gitignore` แล้ว
+ข้อมูลลูกค้า ไฟล์ที่ลูกค้าส่งมา เสียง และคลิป final จะไม่หลุดขึ้น git ตอน `git add .`
 
 ## 3-4. Brand Bible และ Script
 

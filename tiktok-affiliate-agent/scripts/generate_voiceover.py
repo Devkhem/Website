@@ -40,7 +40,7 @@ def resolve_job(jobs_root: str, job_id: str) -> Path:
     raise SystemExit(f"ไม่พบงาน: {job_id}")
 
 
-AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a"]
+AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw"]
 
 
 def audio_extension(settings: dict) -> str:
@@ -151,6 +151,11 @@ def main(argv: "list | None" = None) -> None:
     print(f"งาน: {job_path}")
     print(f"ซีนที่ต้องอัด: {len(pending)} | ตัวอักษรรวม: {total_chars}")
     print(f"model: {settings.get('model_id', 'eleven_multilingual_v2')} | voice: {voice_id or '(ยังไม่ตั้งค่า)'}")
+
+    if not pending:
+        # Nothing to synthesize, so a rerun must not fail on missing credentials.
+        print("ไม่มีซีนที่ต้องอัดเพิ่ม")
+        return
 
     if not args.execute:
         print()

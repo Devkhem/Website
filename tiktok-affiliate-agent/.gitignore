@@ -1,0 +1,6 @@
+# Client jobs hold names, contact details, briefs, supplied assets, voice-over
+# and final videos. None of that belongs in the repo.
+outputs/clients/
+
+# Real API keys for TikTok and ElevenLabs live here. Only .env.example is tracked.
+.env

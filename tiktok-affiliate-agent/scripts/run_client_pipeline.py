@@ -53,7 +53,7 @@ STAGE_LABELS = {
 
 IMAGE_SUFFIXES = [".png", ".jpg", ".jpeg", ".webp"]
 CLIP_SUFFIXES = [".mp4", ".mov", ".webm"]
-AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a"]
+AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw"]
 FINAL_SUFFIXES = [".mp4", ".mov"]
 
 
@@ -79,6 +79,33 @@ def slugify(value: str, fallback: str = "client") -> str:
     cleaned = re.sub(r"[^0-9A-Za-z฀-๿\-_]", "", cleaned)
     cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-_")
     return cleaned[:40] or fallback
+
+
+def safe_component(value: str) -> str:
+    """Reduce an id to something that can only ever name a file inside its folder.
+
+    Scene and shot ids arrive from pasted LLM output, so `../..` or an absolute
+    path would otherwise let `sync` write prompt files anywhere on disk.
+    """
+    cleaned = re.sub(r"[^0-9A-Za-z฀-๿._-]", "-", str(value or "").strip())
+    cleaned = re.sub(r"-{2,}", "-", cleaned).strip("-._")
+    if not cleaned or set(cleaned) <= {"."}:
+        return ""
+    return cleaned[:60]
+
+
+def normalize_ids(entries: list, prefix: str, extra_keys: list = ()) -> None:
+    """Rewrite ids in place so every downstream path and lookup uses the safe form."""
+    for index, entry in enumerate(entries, start=1):
+        for key in ["id"] + list(extra_keys):
+            raw = str(entry.get(key) or "").strip()
+            if key == "id":
+                safe = safe_component(raw) or f"{prefix}-{index:02d}"
+            else:
+                safe = safe_component(raw)
+            if safe != raw:
+                print(f"[warn] `{key}` `{raw}` ใช้เป็นชื่อไฟล์ไม่ได้ เปลี่ยนเป็น `{safe}`")
+                entry[key] = safe
 
 
 def find_asset(directory: Path, stem: str, suffixes: list) -> "Path | None":
@@ -355,7 +382,7 @@ def script_prompt(brief: dict, brand_bible: str) -> str:
     )
 
 
-def shot_list_prompt(brief: dict, script: dict, rules: dict) -> str:
+def shot_list_prompt(brief: dict, script: dict, rules: dict, brand_bible: str) -> str:
     scenes = script.get("scenes", [])
     scene_lines = [
         f"- {scene.get('id', '')} ({scene.get('duration_sec', 0)}s, {scene.get('beat', '')}): {scene.get('vo', '')}"
@@ -374,6 +401,9 @@ def shot_list_prompt(brief: dict, script: dict, rules: dict) -> str:
         ]
         + extras_block(brief)
         + [
+            "",
+            "ทุก image_prompt ต้องอยู่ในกรอบ Visual direction ของ Brand Bible นี้:",
+            brand_bible.strip() if brand_bible.strip() else "(ยังไม่มี brand-bible.md ให้ยึดตาม brief ด้านบน)",
             "",
             "สคริปต์:",
             "\n".join(scene_lines) if scene_lines else "-",
@@ -506,6 +536,10 @@ class Job:
         if bad:
             print(f"[warn] {path.name} รายการที่ {', '.join(str(index) for index in bad)} ใน `{required_key}` ไม่ใช่ object")
             return {}
+        if required_key == "scenes":
+            normalize_ids(entries, "sc")
+        elif required_key == "shots":
+            normalize_ids(entries, "sh", ["scene_id"])
         return payload
 
 
@@ -532,7 +566,7 @@ def audio_extension(fields_config: dict) -> str:
     return ".mp3"
 
 
-def sync_job(job: Job, fields_config: dict) -> dict:
+def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     brief = job.brief
     if not brief:
         raise SystemExit(f"ไม่พบ brief.json ใน {job.path}")
@@ -567,7 +601,7 @@ def sync_job(job: Job, fields_config: dict) -> dict:
 
     # --- shot list ---
     if script:
-        write_text(job.path / "03-shot-list-prompt.md", shot_list_prompt(brief, script, rules))
+        write_text(job.path / "03-shot-list-prompt.md", shot_list_prompt(brief, script, rules, brand_bible))
     shot_list = job.load_stage_json(job.shot_list_path, "shots")
     shots = shot_list.get("shots", []) if shot_list else []
     uncovered = uncovered_scenes(script, shots)
@@ -614,7 +648,11 @@ def sync_job(job: Job, fields_config: dict) -> dict:
         missing_vo = [s for s in voiced if not find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES)]
         stages["voiceover"] = "done" if not missing_vo else "ready"
         if missing_vo:
-            actions.append(f'อัดเสียง {len(missing_vo)} ซีนที่ยังขาด: `python3 scripts/generate_voiceover.py "{job.path}" --execute`')
+            fields_flag = f' --fields "{fields_path}"' if fields_path and Path(fields_path) != DEFAULT_FIELDS else ""
+            actions.append(
+                f'อัดเสียง {len(missing_vo)} ซีนที่ยังขาด: '
+                f'`python3 scripts/generate_voiceover.py "{job.path}"{fields_flag} --execute`'
+            )
     else:
         stages["voiceover"] = "blocked"
 
@@ -862,7 +900,7 @@ def cmd_new(args: argparse.Namespace) -> None:
         if moved:
             print(f"ย้ายงานเดิม {len(moved)} รายการเข้า archive แล้ว: {', '.join(moved)}")
     write_json(job.brief_path, brief)
-    manifest = sync_job(job, fields_config)
+    manifest = sync_job(job, fields_config, args.fields)
     print(f"สร้างงานใหม่: {job_path}")
     print_status(manifest)
 
@@ -870,7 +908,7 @@ def cmd_new(args: argparse.Namespace) -> None:
 def cmd_sync(args: argparse.Namespace) -> None:
     fields_config = read_json(Path(args.fields))
     job = Job(resolve_job(args.jobs, args.job_id))
-    manifest = sync_job(job, fields_config)
+    manifest = sync_job(job, fields_config, args.fields)
     print(f"อัปเดตงาน: {job.path}")
     print_status(manifest)
 
