@@ -113,14 +113,15 @@ def decision_from_metrics(config: dict, metrics: list) -> tuple:
     return "test_more", "Retention ยังพอทดสอบได้: ทำอีก 1 variation ก่อนตัดสินใจ"
 
 
+def episode_number(row: dict) -> int:
+    try:
+        return int(str(row.get("episode") or "").strip())
+    except ValueError:
+        return 0
+
+
 def posted_episodes(metrics: list) -> set:
-    numbers = set()
-    for row in metrics:
-        try:
-            numbers.add(int(str(row.get("episode") or "").strip()))
-        except ValueError:
-            continue
-    return numbers
+    return {number for number in (episode_number(row) for row in metrics) if number}
 
 
 def latest_episode_number(metrics: list) -> int:
@@ -418,17 +419,25 @@ def main() -> None:
     series = select_series(config, args.series_id)
     metrics = read_latest_metrics(Path(args.metrics), series.get("id", ""))
     history = read_series_rows(Path(args.metrics), series.get("id", ""))
-    decision_key, decision = decision_from_metrics(config, metrics)
+    known = {int(item.get("episode", 0)) for item in series.get("episodes", [])}
+    # A metrics row for an episode this series does not have cannot decide anything.
+    unknown_rows = posted_episodes(history) - known
+    if unknown_rows:
+        print(f"[warn] ข้าม metrics ของ episode ที่ไม่มีใน series: {', '.join(str(n) for n in sorted(unknown_rows))}")
+    metrics = [row for row in metrics if episode_number(row) in known]
+    posted = posted_episodes(history) & known
     posting_windows = config.get("posting_windows") or ["12:00", "18:30", "22:30"]
-    posted = posted_episodes(history)
-    exhausted = decision_key != "kill" and not [
-        item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
-    ]
-    target_episode = latest_episode_number(metrics)
-    # The gate follows the newest posted episode: an older 2h row does not release it.
+    # The gate and the decision both follow the newest posted episode, whatever
+    # order the spreadsheet happens to be in.
     latest_posted = max(posted) if posted else 0
     measured_at_two_hours = posted_episodes(metrics)
     awaiting_metric = bool(posted) and latest_posted not in measured_at_two_hours
+    deciding_rows = [row for row in metrics if episode_number(row) == latest_posted] if latest_posted else metrics
+    decision_key, decision = decision_from_metrics(config, deciding_rows)
+    target_episode = latest_posted or latest_episode_number(deciding_rows)
+    exhausted = decision_key != "kill" and not [
+        item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
+    ]
     episodes = [] if awaiting_metric else select_episodes(series, decision_key, posted, target_episode)
     unmappable = decision_key == "rewrite_hook" and not episodes
     needs_hook = decision_key == "rewrite_hook" and not unmappable and not args.hook.strip()

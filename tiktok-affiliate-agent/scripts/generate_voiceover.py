@@ -130,15 +130,33 @@ def asset_stamp(asset: "Path | None") -> str:
     return f"{asset.name}:{info.st_mtime_ns}:{info.st_size}"
 
 
+AUDIO_SIGNATURES = [b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xe3", b"RIFF", b"ftyp", b"OggS"]
+RAW_AUDIO_SUFFIXES = {".pcm", ".ulaw", ".alaw"}
+MIN_AUDIO_BYTES = 512
+
+
+def looks_like_audio(path: Path) -> bool:
+    """Same bar the pipeline applies, so a rejected take is re-recorded here."""
+    if path.stat().st_size < MIN_AUDIO_BYTES:
+        return False
+    if path.suffix.lower() in RAW_AUDIO_SUFFIXES:
+        return True
+    try:
+        head = path.open("rb").read(16)
+    except OSError:
+        return False
+    return any(signature in head for signature in AUDIO_SIGNATURES)
+
+
 def find_existing_audio(directory: Path, stem: str) -> "Path | None":
-    """Any supported recording counts, whatever its case or extension."""
+    """Any usable recording counts, whatever its case or extension."""
     if not stem or not directory.exists():
         return None
     matches = [
         item
         for item in directory.iterdir()
-        if item.is_file() and item.stem == stem and item.stat().st_size > 0
-        and item.suffix.lower() in AUDIO_SUFFIXES
+        if item.is_file() and item.stem == stem and item.suffix.lower() in AUDIO_SUFFIXES
+        and looks_like_audio(item)
     ]
     if not matches:
         return None

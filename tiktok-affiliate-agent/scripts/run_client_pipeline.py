@@ -176,31 +176,33 @@ RAW_AUDIO_SUFFIXES = {".pcm", ".ulaw", ".alaw"}
 MIN_MEDIA_BYTES = 512
 
 
-def decodes(path: Path, kind: str) -> bool:
-    """Decode the file, so a download truncated after its header is caught."""
+def decode_problem(path: Path, kind: str) -> str:
+    """Empty when the file decodes; otherwise why it cannot be trusted."""
     if kind == "image":
         try:
-            from PIL import Image  # optional: only needed for the deeper check
+            from PIL import Image
         except ImportError:
-            return True
+            return "ตรวจภาพไม่ได้เพราะยังไม่ได้ติดตั้ง Pillow (python3 -m pip install -r requirements.txt)"
         try:
             with Image.open(path) as image:
                 image.verify()
             with Image.open(path) as image:
                 image.load()
         except Exception:
-            return False
-        return True
+            return "เปิดภาพไม่ได้ ไฟล์อาจดาวน์โหลดไม่ครบ"
+        return ""
     probe = shutil.which("ffprobe")
     if not probe:
-        return True
+        return "ตรวจไฟล์ไม่ได้เพราะเครื่องนี้ไม่มี ffprobe ให้ติดตั้ง ffmpeg ก่อน"
     stream = "v:0" if kind == "clip" else "a:0"
     result = subprocess.run(
         [probe, "-v", "error", "-select_streams", stream, "-show_entries",
          "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
         capture_output=True, text=True,
     )
-    return result.returncode == 0 and bool(result.stdout.strip())
+    if result.returncode != 0 or not result.stdout.strip():
+        return "ถอดรหัสไม่ได้ ไฟล์อาจเสียหรือดาวน์โหลดไม่ครบ"
+    return ""
 
 
 _MEDIA_VERDICTS = {}
@@ -251,8 +253,8 @@ def usable_asset(path: "Path | None", kind: str) -> bool:
         return False
     key = (str(path), asset_stamp(path), kind)
     if key not in _MEDIA_VERDICTS:
-        _MEDIA_VERDICTS[key] = decodes(path, kind)
-    return _MEDIA_VERDICTS[key]
+        _MEDIA_VERDICTS[key] = decode_problem(path, kind)
+    return not _MEDIA_VERDICTS[key]
 
 
 def checked_asset(directory: Path, stem: str, suffixes: list, kind: str) -> "Path | None":
@@ -260,10 +262,8 @@ def checked_asset(directory: Path, stem: str, suffixes: list, kind: str) -> "Pat
     if asset is None:
         return None
     if not usable_asset(asset, kind):
-        warn_once(
-            f"broken:{asset}",
-            f"[warn] {directory.name}/{asset.name} ยังไม่ใช่ไฟล์ {kind} ที่ใช้ได้ (ไฟล์เสียหรือดาวน์โหลดไม่ครบ)",
-        )
+        reason = _MEDIA_VERDICTS.get((str(asset), asset_stamp(asset), kind)) or "ไฟล์เสียหรือยังไม่สมบูรณ์"
+        warn_once(f"broken:{asset}", f"[warn] {directory.name}/{asset.name} ใช้ไม่ได้: {reason}")
         return None
     return asset
 
@@ -620,7 +620,8 @@ def script_prompt(brief: dict, brand_bible: str) -> str:
             "ใช้ Brand Bible นี้เป็นกรอบ:",
             bible_block,
             "",
-            f"แบ่งเป็น {scene_count} ซีน รวมเวลาต้องไม่เกิน {duration} วินาที",
+            f"แบ่งเป็น {scene_count} ซีน และเวลารวมทุกซีนต้องเท่ากับ {duration} วินาที "
+            f"(คลาดได้ไม่เกิน {max(2.0, duration * 0.05):g} วินาที)",
             "ซีนแรกคือ hook ที่ทำให้หยุดนิ้วใน 3 วินาที ซีนสุดท้ายคือ CTA",
             "voiceover ต้องเป็นภาษาพูด อ่านออกเสียงแล้วลื่น ไม่มีอิโมจิ ไม่มีวงเล็บกำกับ",
             "on_screen_text ห้ามเกิน 2 บรรทัด" if wants_subtitles(brief) else "ห้ามใส่ตัวหนังสือบนจอเลย ให้ on_screen_text เป็นค่าว่างทุกซีน",
@@ -944,7 +945,7 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
         shot_id = str(shot.get("id") or "")
         record = log.get(shot_id) if isinstance(log.get(shot_id), dict) else {}
         still = checked_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES, "image")
-        still_stamp = asset_stamp(still)
+        still_stamp = content_identity(still) if still else ""
         for kind, directory, suffixes, fingerprint in (
             ("still", job.stills_dir, IMAGE_SUFFIXES, shot_image_fingerprint(shot, brief, rules)),
             ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot, brief, still_stamp)),
