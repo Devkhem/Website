@@ -1,0 +1,153 @@
+name: story_first_tiktok_channel_agent
+version: 1
+language: th
+core_workflow: "ChatGPT image -> Codex 3 clips -> test posts -> retention review -> next episode"
+
+schedule:
+  cadence: daily
+  recommended_start_time: "09:00"
+  posting_windows:
+    - "12:00"
+    - "18:30"
+    - "22:30"
+
+inputs:
+  tiktok_account: data/tiktok_account.json
+  story_series: data/story_series.json
+  story_metrics: data/story_metrics.csv
+  image_source:
+    primary: "ChatGPT image generation"
+    fallback: "Higgsfield image generation only when ChatGPT image is not enough"
+
+outputs:
+  daily_story_plan_markdown: outputs/<date>/story-channel-plan.md
+  story_posting_queue_csv: outputs/<date>/story_posting_queue.csv
+  image_prompt: outputs/<date>/chatgpt-image-prompt.txt
+  ops_workflow_doc: docs/daily-story-ops-workflow.md
+  clip_packages:
+    - outputs/<date>/episode-01-package.md
+    - outputs/<date>/episode-02-package.md
+    - outputs/<date>/episode-03-package.md
+
+strategy:
+  primary_goal: "สร้างช่องเรื่องเล่าที่ผลิตได้ทุกวัน โดยคุมต้นทุนต่ำและทดสอบ retention ก่อน scale"
+  cost_rule: "ใช้ภาพ AI 1 ภาพให้แตกเป็นอย่างน้อย 3 คลิป ก่อนสร้างภาพใหม่"
+  content_rule: "ภาพต้องดูเหมือนภาพหลุด/มือถือ/CCTV/found footage ไม่ใช่โปสเตอร์ผี"
+  posting_rule: "โพสต์ทดสอบก่อน แล้วดู retention 2 ชั่วโมงและ 24 ชั่วโมง"
+  scale_rule: "ทำตอนต่อจากภาพหรือสถานที่เดิมเฉพาะเมื่อ retention ผ่านเกณฑ์"
+  status_rule: "ห้ามเรียกว่าโพสต์ได้จนกว่าจะมี MP4 ผ่าน validation และถูกคัดลอกไป Desktop"
+  statuses:
+    PLAN_READY: "มี prompt, plan, queue แต่ยังไม่มี MP4"
+    POST_READY: "มี MP4 ผ่าน validation และอยู่บน Desktop"
+    TEST_POSTED: "โพสต์ Episode 1 แล้วและรอ retention"
+
+agents:
+  - id: story_research_agent
+    role: "เลือก premise เรื่องเล่า"
+    output:
+      - story_seed
+      - location
+      - fear_mechanic
+      - twist
+    rules:
+      - "ต้องเล่าได้เป็น 3 ตอนจากภาพเดียว"
+      - "hook ต้องเข้าใจใน 2 วินาทีแรก"
+      - "หลีกเลี่ยงภาพผีชัดเกินไป เพราะจะตลกและเสียความน่าเชื่อ"
+
+  - id: image_prompt_agent
+    role: "เขียน prompt ให้ ChatGPT สร้างภาพแม่"
+    prompt_file: prompts/story_image_prompt_agent.md
+    output:
+      - chatgpt_image_prompt
+      - negative_prompt
+      - visual_notes
+    rules:
+      - "ขอภาพแนว realistic found-footage หรือ phone snapshot"
+      - "ไม่มี text, watermark, logo"
+      - "ให้มีพื้นที่มืดหรือ negative space สำหรับ subtitle"
+      - "ต้องไม่บังคับให้เห็นผีชัด ให้เป็นเงาหรือความผิดปกติเล็ก ๆ"
+
+  - id: codex_video_agent
+    role: "แตกภาพเดียวเป็นคลิป 3 ตอน"
+    output:
+      - episode_1_video
+      - episode_2_video
+      - episode_3_video
+      - captions
+      - hashtags
+    rules:
+      - "ใช้ภาพเดียวทำ zoom, pan, crop, glitch, subtitles, ambient sound"
+      - "ตอน 1 = hook และสถานที่"
+      - "ตอน 2 = หลักฐาน/ข้อความ/เสียง"
+      - "ตอน 3 = twist และ comment bait"
+      - "แต่ละคลิป 20-35 วินาที"
+
+  - id: publisher_agent
+    role: "เตรียมโพสต์ทดสอบ"
+    output:
+      - story_posting_queue
+      - approval_checklist
+    human_approval_required: true
+    rules:
+      - "ต้องดูคลิปเต็มก่อนโพสต์"
+      - "ต้องตรวจว่าไม่มีข้อมูลส่วนตัวจริง"
+      - "ไม่อ้างว่าเป็นเหตุการณ์จริงถ้าแต่งขึ้น"
+      - "ถ้าโพสต์ผ่านบัญชีจริง ต้องได้รับอนุมัติจากผู้ใช้ก่อน"
+
+  - id: retention_agent
+    role: "อ่านผล retention และตัดสินใจทำตอนต่อ"
+    input:
+      - story_metrics
+    output:
+      - keep_or_kill_decision
+      - next_episode_instruction
+    thresholds:
+      strong:
+        two_hour_retention_percent: 35
+        two_hour_avg_watch_seconds: 8
+        comments: 3
+      continue_test:
+        two_hour_retention_percent: 25
+        two_hour_avg_watch_seconds: 6
+      kill:
+        two_hour_retention_percent_below: 20
+    rules:
+      - "ถ้า retention สูง ให้ทำตอนต่อจากสถานที่เดิม"
+      - "ถ้า retention กลาง ให้เปลี่ยน hook แต่ใช้ภาพเดิม"
+      - "ถ้า retention ต่ำ ให้ทิ้ง premise แต่เก็บ format ที่อ่านง่ายไว้"
+
+daily_loop:
+  - step: 1
+    name: "ChatGPT creates 1 image"
+    owner: "user_or_image_agent"
+    output: "one key visual"
+  - step: 2
+    name: "Codex creates 3 clips from the same image"
+    owner: "codex_video_agent"
+    output: "three TikTok-ready MP4 files"
+  - step: 3
+    name: "Post test clips"
+    owner: "publisher_agent + human approval"
+    output: "posted videos or drafts"
+  - step: 4
+    name: "Record retention"
+    owner: "retention_agent"
+    output: "story_metrics.csv updated"
+  - step: 5
+    name: "Make next episode"
+    owner: "story_research_agent + codex_video_agent"
+    output: "next day story plan"
+
+automation_boundaries:
+  can_automate_now:
+    - "สร้าง prompt ภาพสำหรับ ChatGPT"
+    - "เขียนเรื่อง 3 ตอน"
+    - "สร้าง caption/hashtags"
+    - "ทำ posting queue"
+    - "เรนเดอร์คลิปจากภาพที่มีในเครื่อง"
+    - "สรุปผลจาก metrics ที่ผู้ใช้กรอก"
+  needs_user_or_integration:
+    - "สั่ง ChatGPT สร้างภาพในบัญชีผู้ใช้ ถ้าไม่มี API"
+    - "ดาวน์โหลดภาพจาก ChatGPT มาใส่โปรเจกต์"
+    - "โพสต์จริงใน TikTok"
+    - "ดึง retention อัตโนมัติจาก TikTok Studio"
