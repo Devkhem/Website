@@ -40,6 +40,21 @@ def resolve_job(jobs_root: str, job_id: str) -> Path:
     raise SystemExit(f"ไม่พบงาน: {job_id}")
 
 
+AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a"]
+
+
+def find_existing_audio(directory: Path, stem: str) -> "Path | None":
+    """Any supported recording counts, whatever its case or extension."""
+    if not stem or not directory.exists():
+        return None
+    for item in sorted(directory.iterdir()):
+        if not item.is_file() or item.stem != stem or item.stat().st_size == 0:
+            continue
+        if item.suffix.lower() in AUDIO_SUFFIXES:
+            return item
+    return None
+
+
 def read_lines(path: Path) -> list:
     if not path.exists():
         raise SystemExit(f"ไม่พบ {path} ให้รัน run_client_pipeline.py sync ก่อน")
@@ -109,15 +124,17 @@ def main(argv: "list | None" = None) -> None:
 
     pending = []
     for row in rows:
+        scene_id = str(row.get("scene_id") or "").strip()
         text = str(row.get("vo_text") or "").strip()
-        output = voice_dir / (row.get("output_file") or f"{row.get('scene_id', 'sc-xx')}.mp3")
+        output = voice_dir / (row.get("output_file") or f"{scene_id or 'sc-xx'}.mp3")
         if not text:
-            print(f"[skip] {row.get('scene_id')} ไม่มีข้อความพูด")
+            print(f"[skip] {scene_id} ไม่มีข้อความพูด")
             continue
-        if output.exists() and output.stat().st_size > 0 and not args.overwrite:
-            print(f"[skip] {row.get('scene_id')} มีไฟล์อยู่แล้ว: {output.name}")
+        existing = find_existing_audio(voice_dir, scene_id) or find_existing_audio(voice_dir, output.stem)
+        if existing and not args.overwrite:
+            print(f"[skip] {scene_id} มีไฟล์อยู่แล้ว: {existing.name}")
             continue
-        pending.append((row.get("scene_id", ""), text, output))
+        pending.append((scene_id, text, output))
 
     total_chars = sum(len(text) for _, text, _ in pending)
     print(f"งาน: {job_path}")
@@ -156,7 +173,10 @@ def main(argv: "list | None" = None) -> None:
 
     print()
     print(f"สำเร็จ {len(pending) - failed}/{len(pending)} ซีน")
-    print("รัน `python3 scripts/run_client_pipeline.py sync <job>` เพื่ออัปเดตสถานะ")
+    print(f'รัน `python3 scripts/run_client_pipeline.py sync "{job_path}"` เพื่ออัปเดตสถานะ')
+    if failed:
+        # Exit nonzero so a shell pipeline does not treat a failed batch as done.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,15 @@ python3 scripts/run_client_pipeline.py new --responses ~/Downloads/form.csv --ma
 python3 scripts/run_client_pipeline.py new --responses ~/Downloads/form.csv --field duration_sec=30 --field aspect_ratio=1:1
 ```
 
+ถ้าลูกค้าส่ง brief ใหม่ทับงานเดิม
+
+```bash
+python3 scripts/run_client_pipeline.py new --responses ~/Downloads/form.csv --job-id <job-id> --force
+```
+
+`--force` จะย้ายของเดิมทั้งหมด (brand bible, script, ภาพ, คลิป, เสียง, ไฟล์ final) เข้า `archive-<เวลา>/`
+แล้วเริ่มนับหนึ่งใหม่จาก brief ใหม่ ไม่ให้ review packet ของ brief ใหม่ไปหยิบไฟล์ final ของรอบเก่ามาใช้
+
 ถ้าคำถามในฟอร์มถูกเปลี่ยน ให้เพิ่มคำค้นใน `data/client_intake_fields.json` ที่ `field_keywords`
 สคริปต์จับคู่จากคำที่อยู่ในหัวคอลัมน์ ไม่ต้องตั้งชื่อคอลัมน์ตรงเป๊ะ
 คำตอบที่ยัง map ไม่เข้าฟิลด์ไหนจะถูกเก็บไว้ใน `form_extra` ไม่หายไป
@@ -143,6 +152,9 @@ python3 scripts/generate_voiceover.py <job-id> --scene sc-03 --overwrite --execu
 ```
 
 ไฟล์ที่มีอยู่แล้วจะถูกข้าม ยกเว้นใส่ `--overwrite` จึงไม่เสีย credit ซ้ำ
+ถ้าอัดเสียงเองมาวางเป็น `.wav` หรือ `.m4a` ก็นับว่าซีนนั้นเสร็จแล้วเหมือนกัน
+
+ซีนที่ตั้งใจไม่ให้มีเสียงพูด (`vo` ว่าง) จะขึ้นสถานะ `no-vo` ใน `lines.csv` และไม่ถือว่าค้าง
 
 ## 8. Premiere Pro
 

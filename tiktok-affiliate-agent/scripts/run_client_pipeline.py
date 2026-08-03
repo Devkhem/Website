@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import re
 import sys
@@ -81,18 +82,27 @@ def slugify(value: str, fallback: str = "client") -> str:
 
 
 def find_asset(directory: Path, stem: str, suffixes: list) -> "Path | None":
+    """Find `<stem>.<suffix>` in a directory, matching the extension case-insensitively."""
+    if not stem or not directory.exists():
+        return None
+    entries = [
+        item
+        for item in directory.iterdir()
+        if item.is_file() and item.stem == stem and item.stat().st_size > 0
+    ]
     for suffix in suffixes:
-        candidate = directory / f"{stem}{suffix}"
-        if candidate.exists() and candidate.stat().st_size > 0:
-            return candidate
+        for item in entries:
+            if item.suffix.lower() == suffix.lower():
+                return item
     return None
 
 
 def first_file(directory: Path, suffixes: list) -> "Path | None":
     if not directory.exists():
         return None
+    wanted = [suffix.lower() for suffix in suffixes]
     for item in sorted(directory.iterdir()):
-        if item.suffix.lower() in suffixes and item.stat().st_size > 0:
+        if item.is_file() and item.suffix.lower() in wanted and item.stat().st_size > 0:
             return item
     return None
 
@@ -116,7 +126,8 @@ def read_responses(source: str) -> list:
     if source.startswith("http://") or source.startswith("https://"):
         with urllib.request.urlopen(source, timeout=30) as response:  # noqa: S310 - user supplied
             raw = response.read().decode("utf-8-sig")
-        return list(csv.DictReader(raw.splitlines()))
+        # StringIO keeps newlines inside quoted answers intact; splitlines() would drop them.
+        return list(csv.DictReader(io.StringIO(raw, newline="")))
     path = Path(source)
     if not path.exists():
         raise SystemExit(f"ไม่พบไฟล์คำตอบฟอร์ม: {path}")
@@ -139,6 +150,21 @@ def select_response(rows: list, row_index: int, match: str) -> dict:
         raise SystemExit(f"ไม่มีแถวที่ {row_index} (มีทั้งหมด {len(rows)} แถว)")
 
 
+def header_matches(header: str, needle: str) -> bool:
+    """ASCII keywords must start a word, so `line` hits `Line ID` but not `Deadline`.
+
+    The end is left open so `note` still matches `Notes`. Thai keywords stay plain
+    substring matches because Thai text has no word separators.
+    """
+    lowered = str(header).lower()
+    keyword = str(needle).lower().strip()
+    if not keyword:
+        return False
+    if keyword.isascii():
+        return re.search(r"\b" + re.escape(keyword), lowered) is not None
+    return keyword in lowered
+
+
 def map_response(row: dict, keywords: dict) -> dict:
     """Map arbitrary Google Form column headers onto canonical brief fields."""
     mapped = {}
@@ -147,8 +173,7 @@ def map_response(row: dict, keywords: dict) -> dict:
         for header, value in row.items():
             if header in used_headers or not str(value or "").strip():
                 continue
-            lowered = str(header).lower()
-            if any(str(needle).lower() in lowered for needle in needles):
+            if any(header_matches(header, needle) for needle in needles):
                 mapped[field] = str(value).strip()
                 used_headers.add(header)
                 break
@@ -162,11 +187,29 @@ def map_response(row: dict, keywords: dict) -> dict:
     return mapped
 
 
+def parse_duration(value, default: int) -> int:
+    """Read a free-form duration answer without gluing separate numbers together."""
+    text = str(value or "").strip()
+    numbers = [int(found) for found in re.findall(r"\d+", text)]
+    if not numbers:
+        return default
+    if re.search(r"นาที|minute|\bmin\b", text, re.IGNORECASE):
+        seconds = numbers[0] * 60 + (numbers[1] if len(numbers) > 1 else 0)
+    else:
+        seconds = numbers[0]
+        if len(numbers) > 1:
+            print(f"[warn] ความยาว `{text}` มีหลายตัวเลข ใช้ {seconds} วินาที ถ้าไม่ตรงให้ใส่ --field duration_sec=<วินาที>")
+    if seconds < 3 or seconds > 900:
+        print(f"[warn] ความยาว {seconds} วินาทีดูผิดปกติ ใช้ค่าเริ่มต้น {default} วินาทีแทน")
+        return default
+    return seconds
+
+
 def build_brief(mapped: dict, defaults: dict, overrides: dict) -> dict:
     brief = dict(defaults)
     brief.update(mapped)
     brief.update(overrides)
-    brief["duration_sec"] = int(re.sub(r"[^0-9]", "", str(brief.get("duration_sec", ""))) or defaults.get("duration_sec", 45))
+    brief["duration_sec"] = parse_duration(brief.get("duration_sec"), int(defaults.get("duration_sec", 45)))
     brief["scene_count"] = int(brief.get("scene_count") or defaults.get("scene_count", 6))
     brief.setdefault("client_name", "ลูกค้าไม่ระบุชื่อ")
     brief["received_at"] = brief.get("received_at") or datetime.now().isoformat(timespec="seconds")
@@ -310,6 +353,18 @@ def shot_list_prompt(brief: dict, script: dict, rules: dict) -> str:
     )
 
 
+def orientation_hint(aspect_ratio: str) -> str:
+    parts = re.split(r"[:xX/]", str(aspect_ratio or "").strip())
+    try:
+        width = float(parts[0])
+        height = float(parts[1])
+    except (IndexError, ValueError):
+        return "vertical"
+    if abs(width - height) < 0.001:
+        return "square"
+    return "vertical" if height > width else "horizontal"
+
+
 def compose_image_prompt(shot: dict, brief: dict, rules: dict) -> str:
     base = str(shot.get("image_prompt") or "").strip()
     if not base:
@@ -329,7 +384,7 @@ def compose_image_prompt(shot: dict, brief: dict, rules: dict) -> str:
             "",
             "PROMPT",
             base,
-            f"vertical {brief.get('aspect_ratio', '9:16')}, photographic, natural light, leave clean space for subtitles",
+            f"{orientation_hint(brief.get('aspect_ratio', '9:16'))} {brief.get('aspect_ratio', '9:16')}, photographic, natural light, leave clean space for subtitles",
             "",
             "NEGATIVE",
             negative,
@@ -391,6 +446,9 @@ class Job:
             payload = read_json(path)
         except json.JSONDecodeError as error:
             print(f"[warn] {path.name} ไม่ใช่ JSON ที่อ่านได้: {error}")
+            return {}
+        if not isinstance(payload, dict):
+            print(f"[warn] {path.name} ต้องเป็น JSON object ที่มีคีย์ `{required_key}` ไม่ใช่ {type(payload).__name__}")
             return {}
         if not payload.get(required_key):
             print(f"[warn] {path.name} ไม่มีคีย์ `{required_key}`")
@@ -471,10 +529,11 @@ def sync_job(job: Job, fields_config: dict) -> dict:
     scenes = script.get("scenes", []) if script else []
     if scenes:
         write_voice_lines(job, brief, scenes, fields_config)
-        missing_vo = [s for s in scenes if not find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES)]
+        voiced = [s for s in scenes if str(s.get("vo") or "").strip()]
+        missing_vo = [s for s in voiced if not find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES)]
         stages["voiceover"] = "done" if not missing_vo else "ready"
         if missing_vo:
-            actions.append(f"อัดเสียง {len(missing_vo)} ซีนที่ยังขาด: `python3 scripts/generate_voiceover.py {job.path.name} --execute`")
+            actions.append(f'อัดเสียง {len(missing_vo)} ซีนที่ยังขาด: `python3 scripts/generate_voiceover.py "{job.path}" --execute`')
     else:
         stages["voiceover"] = "blocked"
 
@@ -527,15 +586,20 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
         writer.writeheader()
         for scene in scenes:
             scene_id = str(scene.get("id") or "").strip() or "sc-xx"
+            vo_text = str(scene.get("vo") or "").strip()
             existing = find_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES)
+            if not vo_text:
+                status = "no-vo"
+            else:
+                status = "done" if existing else "todo"
             writer.writerow(
                 {
                     "scene_id": scene_id,
                     "beat": scene.get("beat", ""),
                     "duration_sec": scene.get("duration_sec", ""),
-                    "vo_text": str(scene.get("vo") or "").strip(),
-                    "output_file": f"{scene_id}.mp3",
-                    "status": "done" if existing else "todo",
+                    "vo_text": vo_text,
+                    "output_file": existing.name if existing else f"{scene_id}.mp3",
+                    "status": status,
                 }
             )
 
@@ -565,6 +629,7 @@ def write_assembly_sheet(job: Job, script: dict, shots: list) -> None:
             still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
             clip = find_asset(job.clips_dir, shot_id, CLIP_SUFFIXES)
             voice = find_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES)
+            silent = not str(scene.get("vo") or "").strip()
             writer.writerow(
                 {
                     "order": index,
@@ -574,7 +639,7 @@ def write_assembly_sheet(job: Job, script: dict, shots: list) -> None:
                     "duration_sec": shot.get("duration_sec", ""),
                     "still_file": f"stills/{still.name}" if still else "MISSING",
                     "clip_file": f"clips/{clip.name}" if clip else "MISSING",
-                    "voice_file": f"voiceover/{voice.name}" if voice else "MISSING",
+                    "voice_file": f"voiceover/{voice.name}" if voice else ("no-vo" if silent else "MISSING"),
                     "on_screen_text": str(scene.get("on_screen_text") or "").replace("\n", " "),
                     "camera_move": shot.get("camera_move", ""),
                 }
@@ -655,6 +720,31 @@ def review_packet(job: Job, brief: dict, script: dict, shots: list, final_file: 
 # ----------------------------------------------------------------- commands
 
 
+def archive_derived(job: Job) -> list:
+    """Move everything produced from the previous brief into archive-<timestamp>/.
+
+    A forced re-intake must never leave an old Brand Bible, script, or final cut
+    in place, or `sync` would mark those stages done and build a review packet
+    that mixes the new brief with the previous deliverable.
+    """
+    if not job.path.exists():
+        return []
+    items = [
+        item
+        for item in sorted(job.path.iterdir())
+        if item.name != job.brief_path.name and not item.name.startswith("archive-")
+    ]
+    if not items:
+        return []
+    target = job.path / f"archive-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    target.mkdir()
+    moved = []
+    for item in items:
+        item.rename(target / item.name)
+        moved.append(item.name)
+    return moved
+
+
 def cmd_new(args: argparse.Namespace) -> None:
     fields_config = read_json(Path(args.fields))
     defaults = fields_config.get("defaults", {})
@@ -675,10 +765,14 @@ def cmd_new(args: argparse.Namespace) -> None:
     job_id = args.job_id or f"{args.date}-{slugify(str(brief.get('client_name', '')))}"
     job_path = Path(args.jobs) / job_id
     if job_path.exists() and not args.force:
-        raise SystemExit(f"มีงานนี้อยู่แล้ว: {job_path} (ใช้ --force เพื่อเขียนทับ brief)")
+        raise SystemExit(f"มีงานนี้อยู่แล้ว: {job_path} (ใช้ --force เพื่อรับ brief ใหม่ ของเดิมจะถูกย้ายเข้า archive)")
     job_path.mkdir(parents=True, exist_ok=True)
 
     job = Job(job_path)
+    if args.force:
+        moved = archive_derived(job)
+        if moved:
+            print(f"ย้ายงานเดิม {len(moved)} รายการเข้า archive แล้ว: {', '.join(moved)}")
     write_json(job.brief_path, brief)
     manifest = sync_job(job, fields_config)
     print(f"สร้างงานใหม่: {job_path}")
