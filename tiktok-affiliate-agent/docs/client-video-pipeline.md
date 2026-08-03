@@ -126,6 +126,7 @@ python3 scripts/run_client_pipeline.py sync <job-id>
 
 ถ้า shot list ไม่ได้ใส่ `image_prompt` มา สคริปต์จะประกอบ prompt ให้จาก description + framing + สินค้า
 เอาภาพที่ได้มาวางเป็น `stills/sh-01.png` (รับ .png .jpg .jpeg .webp)
+ระบบจะเช็กหัวไฟล์ด้วย ไฟล์ที่ดาวน์โหลดไม่ครบหรือเป็นหน้า error จะไม่ถูกนับว่าเสร็จ
 
 ## 6. Google Flow animate
 

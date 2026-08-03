@@ -139,12 +139,10 @@ def select_episodes(series: dict, decision_key: str, posted: set, target_episode
     if decision_key == "kill":
         return []
     if decision_key == "rewrite_hook":
-        # One variation of the episode the decision was actually about.
+        # Only the episode the deciding metric points at; guessing would rewrite the
+        # wrong hook and make the experiment meaningless.
         exact = [item for item in episodes if int(item.get("episode", 0)) == target_episode]
-        if exact:
-            return exact[:1]
-        redo = [item for item in episodes if int(item.get("episode", 0)) in posted]
-        return (redo or episodes)[:1]
+        return exact[:1]
     fresh = [item for item in episodes if int(item.get("episode", 0)) not in posted]
     if not fresh:
         # Everything configured has been posted; repeating it would queue old content.
@@ -231,7 +229,7 @@ def retention_rule_lines(config: dict) -> list:
     ]
 
 
-def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False, decision_key: str = "", wants_new_image: bool = True) -> str:
+def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False, decision_key: str = "", wants_new_image: bool = True, unmappable: bool = False) -> str:
     handle = account.get("handle", "@thatslife6969")
     lines = [
         f"# Story Channel Plan: {plan_date}",
@@ -260,7 +258,12 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
     lines.extend(retention_rule_lines(config))
     lines.append("")
     if not packages:
-        if needs_hook:
+        if unmappable:
+            reason = (
+                "retention บอกให้เปลี่ยน hook แต่แถวที่ใช้ตัดสินไม่ได้ระบุ episode ที่มีอยู่จริง\n"
+                "ให้แก้คอลัมน์ episode ใน metrics ให้ตรงกับ data/story_series.json ก่อน"
+            )
+        elif needs_hook:
             reason = (
                 "retention บอกให้เปลี่ยน hook แต่ยังไม่ได้ระบุ hook ใหม่\n"
                 "เขียน hook ใหม่แล้วรันซ้ำ เช่น --hook \"ประโยคเปิดใหม่ 3 วินาทีแรก\""
@@ -412,8 +415,10 @@ def main() -> None:
     exhausted = decision_key != "kill" and not [
         item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
     ]
-    episodes = select_episodes(series, decision_key, posted, latest_episode_number(metrics))
-    needs_hook = decision_key == "rewrite_hook" and not args.hook.strip()
+    target_episode = latest_episode_number(metrics)
+    episodes = select_episodes(series, decision_key, posted, target_episode)
+    unmappable = decision_key == "rewrite_hook" and not episodes
+    needs_hook = decision_key == "rewrite_hook" and not unmappable and not args.hook.strip()
     if needs_hook:
         # Emitting the old hook again would repeat the test we just failed.
         episodes = []
@@ -436,7 +441,7 @@ def main() -> None:
     (output_dir / "story-channel-plan.md").write_text(
         render_markdown(
             account, config, series, packages, decision, args.date, exhausted, needs_hook,
-            decision_key, wants_new_image,
+            decision_key, wants_new_image, unmappable,
         ),
         encoding="utf-8",
     )
@@ -450,7 +455,9 @@ def main() -> None:
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
     print(f"Decision: {decision}")
-    if needs_hook:
+    if unmappable:
+        print(f"ไม่ได้สร้าง episode package เพราะ metrics ชี้ไป episode {target_episode or '(ว่าง)'} ที่ไม่มีใน series")
+    elif needs_hook:
         print("ไม่ได้สร้าง episode package เพราะยังไม่ได้ระบุ hook ใหม่ ให้รันซ้ำพร้อม --hook")
     elif not packages and exhausted:
         print("ไม่ได้สร้าง episode package เพราะตอนทั้งหมดใน series นี้ถูกโพสต์ไปหมดแล้ว")

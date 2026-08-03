@@ -160,6 +160,47 @@ def warn_once(key: str, message: str) -> None:
     print(message)
 
 
+MEDIA_SIGNATURES = {
+    "image": [b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"RIFF", b"GIF8"],
+    "clip": [b"ftyp", b"\x1a\x45\xdf\xa3", b"RIFF"],
+    "audio": [b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xe3", b"RIFF", b"ftyp", b"OggS"],
+}
+RAW_AUDIO_SUFFIXES = {".pcm", ".ulaw", ".alaw"}
+MIN_MEDIA_BYTES = 512
+
+
+def usable_asset(path: "Path | None", kind: str) -> bool:
+    """A placeholder or a saved error page is not an asset.
+
+    Header sniffing is enough to catch the real cases (1-byte files, HTML error
+    responses, interrupted downloads) without probing every file on every sync.
+    """
+    if path is None:
+        return False
+    if path.stat().st_size < MIN_MEDIA_BYTES:
+        return False
+    if kind == "audio" and path.suffix.lower() in RAW_AUDIO_SUFFIXES:
+        return True  # raw formats carry no header at all
+    try:
+        head = path.open("rb").read(16)
+    except OSError:
+        return False
+    return any(signature in head for signature in MEDIA_SIGNATURES.get(kind, []))
+
+
+def checked_asset(directory: Path, stem: str, suffixes: list, kind: str) -> "Path | None":
+    asset = find_asset(directory, stem, suffixes)
+    if asset is None:
+        return None
+    if not usable_asset(asset, kind):
+        warn_once(
+            f"broken:{asset}",
+            f"[warn] {directory.name}/{asset.name} ยังไม่ใช่ไฟล์ {kind} ที่ใช้ได้ (ไฟล์เสียหรือดาวน์โหลดไม่ครบ)",
+        )
+        return None
+    return asset
+
+
 def find_asset(directory: Path, stem: str, suffixes: list) -> "Path | None":
     """Find `<stem>.<suffix>` in a directory, matching the extension case-insensitively."""
     if not stem or not directory.exists():
@@ -835,13 +876,13 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
     for shot in shots:
         shot_id = str(shot.get("id") or "")
         record = log.get(shot_id) if isinstance(log.get(shot_id), dict) else {}
-        still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
+        still = checked_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES, "image")
         still_stamp = asset_stamp(still)
         for kind, directory, suffixes, fingerprint in (
             ("still", job.stills_dir, IMAGE_SUFFIXES, shot_image_fingerprint(shot, brief, rules)),
             ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot, brief, still_stamp)),
         ):
-            asset = find_asset(directory, shot_id, suffixes)
+            asset = checked_asset(directory, shot_id, suffixes, "image" if kind == "still" else "clip")
             if not asset:
                 result["missing_" + kind + "s"].append(shot_id)
                 record.pop(kind, None)
@@ -1050,7 +1091,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         flow_prompts = {}
         for shot in shots:
             shot_id = str(shot.get("id") or "").strip() or "sh-xx"
-            still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
+            still = checked_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES, "image")
             image_prompts[shot_id] = compose_image_prompt(shot, brief, rules)
             flow_prompts[shot_id] = compose_flow_prompt(shot, brief, still.name if still else f"{shot_id}.png")
             write_text(image_dir / f"{shot_id}.txt", image_prompts[shot_id])
@@ -1088,7 +1129,10 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         voiced = [s for s in scenes if str(s.get("vo") or "").strip()]
         render_log = read_render_log(job.voice_dir)
         voice_sha = voice_fingerprint(fields_config, job.voice_dir)
-        voice_assets = {str(s.get("id", "")): find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES) for s in voiced}
+        voice_assets = {
+            str(s.get("id", "")): checked_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES, "audio")
+            for s in voiced
+        }
         stale_vo = [s for s in voiced if voice_assets[str(s.get("id", ""))] and voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))], voice_sha)]
         missing_vo = [
             s
@@ -1190,7 +1234,7 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
         for scene in scenes:
             scene_id = str(scene.get("id") or "").strip() or "sc-xx"
             vo_text = str(scene.get("vo") or "").strip()
-            existing = find_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES)
+            existing = checked_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES, "audio")
             if not vo_text:
                 status = "no-vo"
             elif not existing:
@@ -1239,9 +1283,9 @@ def write_assembly_sheet(job: Job, brief: dict, script: dict, shots: list) -> No
             shot_id = str(shot.get("id") or "")
             scene_id = str(shot.get("scene_id") or "")
             scene = scenes.get(scene_id, {})
-            still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
-            clip = find_asset(job.clips_dir, shot_id, CLIP_SUFFIXES)
-            voice = find_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES)
+            still = checked_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES, "image")
+            clip = checked_asset(job.clips_dir, shot_id, CLIP_SUFFIXES, "clip")
+            voice = checked_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES, "audio")
             silent = not str(scene.get("vo") or "").strip()
             first_of_scene = scene_id not in voiced_rows
             voiced_rows.add(scene_id)

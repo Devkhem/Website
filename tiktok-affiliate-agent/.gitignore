@@ -4,3 +4,16 @@ outputs/clients/
 
 # Real API keys for TikTok and ElevenLabs live here. Only .env.example is tracked.
 .env
+
+# ไฟล์สื่อที่สคริปต์สร้างเอง ไฟล์เดียวหลายสิบ MB ไม่ควรขึ้น git
+# แผน markdown, csv และ prompt ยัง commit ได้ตามปกติ
+outputs/**/videos/
+outputs/**/*_frames/
+outputs/**/*.png
+outputs/**/*.jpg
+outputs/**/*.jpeg
+outputs/**/*.webp
+outputs/**/*.mp4
+outputs/**/*.mov
+outputs/**/*.wav
+outputs/**/*.mp3

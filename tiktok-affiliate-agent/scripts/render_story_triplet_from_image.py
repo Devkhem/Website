@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import subprocess
 import wave
@@ -189,17 +190,22 @@ def encode_clip(frames_dir: Path, audio_path: Path, output_path: Path) -> None:
             "macOS: brew install ffmpeg | Ubuntu: sudo apt install ffmpeg\n"
             "ถ้าอยากได้เฉพาะเฟรมไว้ไปตัดต่อเอง ให้ใส่ --frames-only"
         )
+    # Encode beside the target and swap only on success, so a failed rerun cannot
+    # truncate a clip that was already post-ready.
+    staging = output_path.with_name(output_path.name + ".part.mp4")
     command = [
         ffmpeg, "-y", "-loglevel", "error",
         "-framerate", str(FPS), "-i", str(frames_dir / "frame_%04d.jpg"),
         "-i", str(audio_path),
         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart",
-        str(output_path),
+        str(staging),
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
+        staging.unlink(missing_ok=True)
         raise SystemExit(f"ffmpeg ล้มเหลว:\n{result.stderr.strip()[-800:]}")
+    os.replace(staging, output_path)
 
 
 def ease(t: float) -> float:
