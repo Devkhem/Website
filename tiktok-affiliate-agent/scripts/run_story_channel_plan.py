@@ -123,13 +123,26 @@ def posted_episodes(metrics: list) -> set:
     return numbers
 
 
-def select_episodes(series: dict, decision_key: str, posted: set) -> list:
+def latest_episode_number(metrics: list) -> int:
+    """The episode behind the retention row the decision was made from."""
+    for row in reversed(metrics):
+        try:
+            return int(str(row.get("episode") or "").strip())
+        except ValueError:
+            continue
+    return 0
+
+
+def select_episodes(series: dict, decision_key: str, posted: set, target_episode: int = 0) -> list:
     """Turn the retention decision into the episodes this run should package."""
     episodes = series.get("episodes", [])
     if decision_key == "kill":
         return []
     if decision_key == "rewrite_hook":
-        # One variation of the episode that underperformed, with a genuinely new hook.
+        # One variation of the episode the decision was actually about.
+        exact = [item for item in episodes if int(item.get("episode", 0)) == target_episode]
+        if exact:
+            return exact[:1]
         redo = [item for item in episodes if int(item.get("episode", 0)) in posted]
         return (redo or episodes)[:1]
     fresh = [item for item in episodes if int(item.get("episode", 0)) not in posted]
@@ -218,7 +231,7 @@ def retention_rule_lines(config: dict) -> list:
     ]
 
 
-def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False) -> str:
+def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False, decision_key: str = "", wants_new_image: bool = True) -> str:
     handle = account.get("handle", "@thatslife6969")
     lines = [
         f"# Story Channel Plan: {plan_date}",
@@ -231,7 +244,13 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
         "## ChatGPT Image Prompt",
         "",
         "```text",
-        build_image_prompt(series) if packages else "(ไม่ออก prompt ภาพ เพราะรอบนี้ยังไม่ทำ premise นี้ต่อ)",
+        build_image_prompt(series)
+        if wants_new_image
+        else (
+            "(ใช้ภาพแม่เดิม รอบนี้เปลี่ยนแค่ hook ไม่ต้องสร้างภาพใหม่)"
+            if decision_key == "rewrite_hook"
+            else "(ไม่ออก prompt ภาพ เพราะรอบนี้ยังไม่ทำ premise นี้ต่อ)"
+        ),
         "```",
         "",
         "## Production Rule",
@@ -380,8 +399,9 @@ def main() -> None:
     exhausted = decision_key != "kill" and not [
         item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
     ]
-    episodes = select_episodes(series, decision_key, posted)
+    episodes = select_episodes(series, decision_key, posted, latest_episode_number(metrics))
     needs_hook = decision_key == "rewrite_hook" and not args.hook.strip()
+    wants_new_image = decision_key not in {"kill", "rewrite_hook"}
     if needs_hook:
         # Emitting the old hook again would repeat the test we just failed.
         episodes = []
@@ -393,19 +413,26 @@ def main() -> None:
     output_dir = Path(args.out) / args.date
     output_dir.mkdir(parents=True, exist_ok=True)
     image_prompt_path = output_dir / "chatgpt-image-prompt.txt"
-    if packages:
+    if wants_new_image:
         image_prompt_path.write_text(build_image_prompt(series), encoding="utf-8")
     elif image_prompt_path.exists():
-        # Following it would spend the next image on the premise we just stopped.
+        # Following it would spend the daily image on a premise we stopped, or on a
+        # round that is meant to change only the hook.
         image_prompt_path.unlink()
     (output_dir / "story-channel-plan.md").write_text(
-        render_markdown(account, config, series, packages, decision, args.date, exhausted, needs_hook), encoding="utf-8"
+        render_markdown(
+            account, config, series, packages, decision, args.date, exhausted, needs_hook,
+            decision_key, wants_new_image,
+        ),
+        encoding="utf-8",
     )
     write_queue(output_dir / "story_posting_queue.csv", packages)
     write_episode_packages(output_dir, packages)
 
-    if packages:
+    if wants_new_image:
         print(f"Created {image_prompt_path}")
+    elif decision_key == "rewrite_hook":
+        print("ใช้ภาพแม่เดิม ไม่ออก prompt ภาพใหม่ เพราะรอบนี้เปลี่ยนแค่ hook")
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
     print(f"Decision: {decision}")
