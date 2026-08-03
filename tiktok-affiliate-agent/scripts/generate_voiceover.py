@@ -78,6 +78,13 @@ def write_render_log(voice_dir: Path, log: dict) -> None:
     path.write_text(json.dumps(log, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def asset_stamp(asset: "Path | None") -> str:
+    if asset is None:
+        return ""
+    info = asset.stat()
+    return f"{asset.name}:{info.st_mtime_ns}:{info.st_size}"
+
+
 def find_existing_audio(directory: Path, stem: str) -> "Path | None":
     """Any supported recording counts, whatever its case or extension."""
     if not stem or not directory.exists():
@@ -169,8 +176,10 @@ def main(argv: "list | None" = None) -> None:
             continue
         existing = find_existing_audio(voice_dir, scene_id) or find_existing_audio(voice_dir, output.stem)
         record = render_log.get(scene_id) if isinstance(render_log.get(scene_id), dict) else {}
-        # A manual take that replaced our file is not ours to call stale.
+        # A manual take is not ours to call stale, even when it kept our filename.
         record_matches = not record.get("file") or (existing is not None and record["file"] == existing.name)
+        if record_matches and record.get("stamp") and existing is not None:
+            record_matches = record["stamp"] == asset_stamp(existing)
         stale = bool(record.get("text_sha")) and record_matches and record["text_sha"] != text_fingerprint(text)
         if existing and stale:
             print(f"[stale] {scene_id} เสียงเดิมอัดจากสคริปต์คนละเวอร์ชัน จะอัดใหม่")
@@ -227,7 +236,11 @@ def main(argv: "list | None" = None) -> None:
             older.rename(parked / older.name)
             print(f"[move] {older.name} -> superseded/ (ถูกแทนที่ด้วย {output.name})")
         # Recording the text lets `sync` spot audio left over from an edited script.
-        render_log[scene_id] = {"text_sha": text_fingerprint(text), "file": output.name}
+        render_log[scene_id] = {
+            "text_sha": text_fingerprint(text),
+            "file": output.name,
+            "stamp": asset_stamp(output),
+        }
         write_render_log(voice_dir, render_log)
         print(f"[ok] {scene_id} -> {output.name} ({len(audio)} bytes)")
 

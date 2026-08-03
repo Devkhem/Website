@@ -31,6 +31,14 @@ def read_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def read_series_rows(path: Path, series_id: str) -> list:
+    """Every row for this series, whatever horizon — this is the posting history."""
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return [row for row in csv.DictReader(handle) if row.get("series_id") == series_id]
+
+
 def read_latest_metrics(path: Path, series_id: str) -> list:
     """Rows for this series that carry a retention number.
 
@@ -46,8 +54,8 @@ def read_latest_metrics(path: Path, series_id: str) -> list:
         if row.get("series_id") != series_id or not str(row.get("retention_percent") or "").strip():
             continue
         value = parse_float(row.get("retention_percent"), None)
-        if value is None or not math.isfinite(value) or value < 0:
-            print(f"[warn] ข้าม metrics แถวที่ retention_percent ใช้ไม่ได้: {row.get('retention_percent')!r}")
+        if value is None or not math.isfinite(value) or not 0 <= value <= 100:
+            print(f"[warn] ข้าม metrics แถวที่ retention_percent ใช้ไม่ได้ (ต้องเป็น 0-100): {row.get('retention_percent')!r}")
             continue
         kept.append(row)
     rows = kept
@@ -108,10 +116,13 @@ def select_episodes(series: dict, decision_key: str, posted: set) -> list:
         redo = [item for item in episodes if int(item.get("episode", 0)) in posted]
         return (redo or episodes)[:3]
     fresh = [item for item in episodes if int(item.get("episode", 0)) not in posted]
+    if not fresh:
+        # Everything configured has been posted; repeating it would queue old content.
+        return []
     if decision_key == "test_more":
         # The decision literally says "one more variation before deciding".
-        return (fresh or episodes)[:1]
-    return (fresh or episodes)[:3]
+        return fresh[:1]
+    return fresh[:3]
 
 
 def parse_float(value, default=0):
@@ -191,7 +202,7 @@ def retention_rule_lines(config: dict) -> list:
     ]
 
 
-def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str) -> str:
+def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False) -> str:
     handle = account.get("handle", "@thatslife6969")
     lines = [
         f"# Story Channel Plan: {plan_date}",
@@ -214,12 +225,17 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
     lines.extend(retention_rule_lines(config))
     lines.append("")
     if not packages:
+        reason = (
+            "retention ต่ำกว่าเกณฑ์ kill จึงไม่ออก episode package ให้รอบนี้"
+            if decision_exhausted is False
+            else "ตอนทั้งหมดใน series นี้ถูกโพสต์ไปหมดแล้ว ต้องเขียน episode ใหม่ก่อน"
+        )
         lines.extend(
             [
-                "## หยุด premise นี้",
+                "## ยังไม่ออก package รอบนี้",
                 "",
-                "retention ต่ำกว่าเกณฑ์ kill จึงไม่ออก episode package ให้รอบนี้",
-                "ให้เลือก series อื่นด้วย --series-id หรือเพิ่ม premise ใหม่ใน data/story_series.json",
+                reason,
+                "ให้เลือก series อื่นด้วย --series-id หรือเพิ่ม episode ใหม่ใน data/story_series.json",
                 "",
             ]
         )
@@ -336,9 +352,13 @@ def main() -> None:
     account = read_json(Path(args.account))
     series = select_series(config, args.series_id)
     metrics = read_latest_metrics(Path(args.metrics), series.get("id", ""))
+    history = read_series_rows(Path(args.metrics), series.get("id", ""))
     decision_key, decision = decision_from_metrics(config, metrics)
     posting_windows = config.get("posting_windows") or ["12:00", "18:30", "22:30"]
-    posted = posted_episodes(metrics)
+    posted = posted_episodes(history)
+    exhausted = decision_key != "kill" and not [
+        item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
+    ]
     episodes = select_episodes(series, decision_key, posted)
     packages = [
         episode_package(series, episode, posting_windows[index % len(posting_windows)], decision_key)
@@ -349,7 +369,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "chatgpt-image-prompt.txt").write_text(build_image_prompt(series), encoding="utf-8")
     (output_dir / "story-channel-plan.md").write_text(
-        render_markdown(account, config, series, packages, decision, args.date), encoding="utf-8"
+        render_markdown(account, config, series, packages, decision, args.date, exhausted), encoding="utf-8"
     )
     write_queue(output_dir / "story_posting_queue.csv", packages)
     write_episode_packages(output_dir, packages)
@@ -358,7 +378,9 @@ def main() -> None:
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
     print(f"Decision: {decision}")
-    if not packages:
+    if not packages and exhausted:
+        print("ไม่ได้สร้าง episode package เพราะตอนทั้งหมดใน series นี้ถูกโพสต์ไปหมดแล้ว")
+    elif not packages:
         print("ไม่ได้สร้าง episode package เพราะ retention ต่ำกว่าเกณฑ์ kill")
     elif posted:
         print(f"ตอนที่โพสต์ไปแล้ว: {', '.join(str(number) for number in sorted(posted))}")

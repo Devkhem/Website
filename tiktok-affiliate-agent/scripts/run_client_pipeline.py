@@ -60,6 +60,7 @@ AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
 AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 FINAL_SUFFIXES = [".mp4", ".mov"]
 ASSET_LOG_VERSION = 4
+SOURCE_LOG_VERSION = 2
 
 
 # ---------------------------------------------------------------- utilities
@@ -134,6 +135,17 @@ def entries_are_valid(entries: list, key: str, name: str) -> bool:
     return ok
 
 
+_WARNED = set()
+
+
+def warn_once(key: str, message: str) -> None:
+    """find_asset runs several times per sync; the operator needs the warning once."""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    print(message)
+
+
 def find_asset(directory: Path, stem: str, suffixes: list) -> "Path | None":
     """Find `<stem>.<suffix>` in a directory, matching the extension case-insensitively."""
     if not stem or not directory.exists():
@@ -143,11 +155,17 @@ def find_asset(directory: Path, stem: str, suffixes: list) -> "Path | None":
         for item in directory.iterdir()
         if item.is_file() and item.stem == stem and item.stat().st_size > 0
     ]
-    for suffix in suffixes:
-        for item in entries:
-            if item.suffix.lower() == suffix.lower():
-                return item
-    return None
+    wanted = [suffix.lower() for suffix in suffixes]
+    entries = [item for item in entries if item.suffix.lower() in wanted]
+    if not entries:
+        return None
+    if len(entries) > 1:
+        warn_once(
+            f"duplicate:{directory}:{stem}",
+            f"[warn] {directory.name}/{stem} มีหลายไฟล์: {', '.join(item.name for item in entries)} ใช้ไฟล์ล่าสุด",
+        )
+    # Newest wins: a replacement saved under another extension must not lose to the old one.
+    return max(entries, key=lambda item: (item.stat().st_mtime_ns, wanted.index(item.suffix.lower())))
 
 
 def matching_files(directory: Path, suffixes: list) -> list:
@@ -202,6 +220,9 @@ def voice_is_stale(scene: dict, log: dict, asset: "Path | None") -> bool:
     if not isinstance(record, dict) or not record.get("text_sha"):
         return False
     if asset is not None and record.get("file") and record["file"] != asset.name:
+        return False
+    if asset is not None and record.get("stamp") and record["stamp"] != asset_stamp(asset):
+        # Same name, different bytes: someone dropped their own take in.
         return False
     return record["text_sha"] != text_fingerprint(scene.get("vo"))
 
@@ -701,36 +722,25 @@ def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str) -> bool
     log = read_source_log(job)
     stamp = asset_stamp(derived if derived.exists() else None)
     entry = log.get(key) if isinstance(log.get(key), dict) else {}
-    if entry.get("stamp") != stamp or not entry.get("source_sha"):
-        # New file, or a record written before this log format: adopt what is on disk.
-        log[key] = {"stamp": stamp, "source_sha": source_sha}
+    if entry.get("stamp") != stamp or entry.get("v") != SOURCE_LOG_VERSION:
+        # New file, or a record written before this fingerprint scheme: adopt what is on disk.
+        log[key] = {"stamp": stamp, "source_sha": source_sha, "v": SOURCE_LOG_VERSION}
         write_json(job.path / "source-log.json", log)
         return False
-    return entry["source_sha"] != source_sha
+    return entry.get("source_sha") != source_sha
 
 
 def brand_bible_source_fingerprint(brief: dict, rules: dict) -> str:
-    """What the Brand Bible was written from: the client's brief plus the visual rules."""
-    fields = [
-        "client_name", "product", "goal", "audience", "tone", "platform", "aspect_ratio",
-        "duration_sec", "must_include", "avoid", "reference", "notes", "assets_link", "language",
-    ]
-    parts = [f"{field}={brief.get(field, '')}" for field in fields]
-    parts.append(f"rules={json.dumps(rules, ensure_ascii=False, sort_keys=True)}")
-    return text_fingerprint("\n".join(parts))
+    """Hash the prompt itself, so nothing that reaches the model is left out."""
+    return text_fingerprint(brand_bible_prompt(brief, rules))
 
 
 def script_source_fingerprint(brief: dict, brand_bible: str) -> str:
-    """What the script was written from: the client's brief plus the Brand Bible."""
-    fields = [
-        "client_name", "product", "goal", "audience", "tone", "platform", "aspect_ratio",
-        "duration_sec", "scene_count", "must_include", "avoid", "reference", "notes",
-        "assets_link", "subtitles", "language",
-    ]
-    parts = [f"{field}={brief.get(field, '')}" for field in fields]
-    parts.append(f"form_extra={json.dumps(brief.get('form_extra') or {}, ensure_ascii=False, sort_keys=True)}")
-    parts.append(f"brand_bible={brand_bible.strip()}")
-    return text_fingerprint("\n".join(parts))
+    return text_fingerprint(script_prompt(brief, brand_bible))
+
+
+def shot_list_source_fingerprint(brief: dict, script: dict, rules: dict, brand_bible: str) -> str:
+    return text_fingerprint(shot_list_prompt(brief, script, rules, brand_bible))
 
 
 def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
@@ -872,7 +882,8 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     shots = shot_list.get("shots", []) if shot_list else []
     script_ok = stages["script"] == "done"
     problems = shot_list_problems(script, shots)
-    if shots and script_ok and derived_is_stale(job, "shot_list", job.shot_list_path, script_scene_fingerprint(script)):
+    shot_list_sources = shot_list_source_fingerprint(brief, script, rules, brand_bible) if script else ""
+    if shots and script_ok and derived_is_stale(job, "shot_list", job.shot_list_path, shot_list_sources):
         problems.append("สคริปต์ถูกแก้หลังจากสร้าง shot list ต้องรัน prompt 03 ใหม่")
     if shots and script_ok and not problems:
         stages["shot_list"] = "done"
@@ -1074,6 +1085,7 @@ def write_assembly_sheet(job: Job, brief: dict, script: dict, shots: list) -> No
             enumerate(shots),
             key=lambda pair: (scene_order.get(str(pair[1].get("scene_id") or ""), len(scene_order)), pair[0]),
         )
+        voiced_rows = set()
         for index, (_, shot) in enumerate(ordered, start=1):
             shot_id = str(shot.get("id") or "")
             scene_id = str(shot.get("scene_id") or "")
@@ -1082,6 +1094,8 @@ def write_assembly_sheet(job: Job, brief: dict, script: dict, shots: list) -> No
             clip = find_asset(job.clips_dir, shot_id, CLIP_SUFFIXES)
             voice = find_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES)
             silent = not str(scene.get("vo") or "").strip()
+            first_of_scene = scene_id not in voiced_rows
+            voiced_rows.add(scene_id)
             writer.writerow(
                 {
                     "order": index,
@@ -1091,8 +1105,14 @@ def write_assembly_sheet(job: Job, brief: dict, script: dict, shots: list) -> No
                     "duration_sec": shot.get("duration_sec", ""),
                     "still_file": f"stills/{still.name}" if still else "MISSING",
                     "clip_file": f"clips/{clip.name}" if clip else "MISSING",
-                    # A cleared `vo` wins over any audio left behind by an earlier take.
-                    "voice_file": "no-vo" if silent else (f"voiceover/{voice.name}" if voice else "MISSING"),
+                    # A cleared `vo` wins over any audio left behind by an earlier take,
+                    # and the narration is placed once, on the scene's first shot.
+                    "voice_file": (
+                        "no-vo" if silent
+                        else "" if not first_of_scene
+                        else f"voiceover/{voice.name}" if voice
+                        else "MISSING"
+                    ),
                     "on_screen_text": (
                         str(scene.get("on_screen_text") or "").replace("\n", " ") if wants_subtitles(brief) else ""
                     ),
