@@ -59,7 +59,7 @@ AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
 # ElevenLabs output_format prefix -> the extension its bytes actually deserve.
 AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 FINAL_SUFFIXES = [".mp4", ".mov"]
-ASSET_LOG_VERSION = 2
+ASSET_LOG_VERSION = 3
 
 
 # ---------------------------------------------------------------- utilities
@@ -647,18 +647,17 @@ def shot_list_problems(script: dict, shots: list) -> list:
     return problems
 
 
-def shot_image_fingerprint(shot: dict) -> str:
-    parts = [shot.get("image_prompt"), shot.get("description"), shot.get("framing"), shot.get("negative")]
-    return text_fingerprint("|".join(str(part or "") for part in parts))
+def shot_image_fingerprint(shot: dict, brief: dict, rules: dict) -> str:
+    """Hash the prompt the artist actually receives, so brief or rule changes count."""
+    return text_fingerprint(compose_image_prompt(shot, brief, rules))
 
 
-def shot_motion_fingerprint(shot: dict, still_stamp: str = "") -> str:
-    """A clip is only current while both its motion brief and its source still are."""
-    parts = [shot.get("motion_prompt"), shot.get("camera_move"), shot.get("duration_sec"), still_stamp]
-    return text_fingerprint("|".join(str(part or "") for part in parts))
+def shot_motion_fingerprint(shot: dict, brief: dict, still_stamp: str = "") -> str:
+    """A clip is only current while both its Flow prompt and its source still are."""
+    return text_fingerprint(compose_flow_prompt(shot, brief, "") + "|" + still_stamp)
 
 
-def track_shot_assets(job: Job, shots: list) -> dict:
+def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
     """Report missing and stale stills/clips, remembering what each asset was made from.
 
     A file that appears or changes on disk is taken to match the definition current
@@ -680,8 +679,8 @@ def track_shot_assets(job: Job, shots: list) -> dict:
         still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
         still_stamp = f"{still.name}:{int(still.stat().st_mtime)}" if still else ""
         for kind, directory, suffixes, fingerprint in (
-            ("still", job.stills_dir, IMAGE_SUFFIXES, shot_image_fingerprint(shot)),
-            ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot, still_stamp)),
+            ("still", job.stills_dir, IMAGE_SUFFIXES, shot_image_fingerprint(shot, brief, rules)),
+            ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot, brief, still_stamp)),
         ):
             asset = find_asset(directory, shot_id, suffixes)
             if not asset:
@@ -703,7 +702,7 @@ def track_shot_assets(job: Job, shots: list) -> dict:
 
 def newest_input_mtime(job: Job) -> float:
     """Latest change among the things a Premiere export is built from."""
-    paths = [job.script_path, job.shot_list_path, job.brief_path]
+    paths = [job.script_path, job.shot_list_path, job.brief_path, job.brand_bible_path]
     paths += matching_files(job.clips_dir, CLIP_SUFFIXES)
     paths += matching_files(job.voice_dir, AUDIO_SUFFIXES)
     stamps = [path.stat().st_mtime for path in paths if path.exists()]
@@ -730,6 +729,18 @@ def script_duration_problem(brief: dict, script: dict) -> str:
     if abs(total - target) <= tolerance:
         return ""
     return f"เวลารวมของสคริปต์ {total:g} วินาที ไม่ตรงกับ brief {target:g} วินาที (คลาดได้ {tolerance:g} วินาที)"
+
+
+def previous_created_at(manifest_path: Path) -> str:
+    """The manifest is our own output; a truncated one must not wedge every later sync."""
+    if manifest_path.exists():
+        try:
+            payload = read_json(manifest_path)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("created_at"):
+            return str(payload["created_at"])
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
@@ -773,13 +784,14 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         write_text(job.path / "03-shot-list-prompt.md", shot_list_prompt(brief, script, rules, brand_bible))
     shot_list = job.load_stage_json(job.shot_list_path, "shots")
     shots = shot_list.get("shots", []) if shot_list else []
+    script_ok = stages["script"] == "done"
     problems = shot_list_problems(script, shots)
-    if shots and script and not problems:
+    if shots and script_ok and not problems:
         stages["shot_list"] = "done"
-    elif shots and not script:
-        # Scene references cannot be checked yet, so do not send anyone into paid image work.
+    elif shots and not script_ok:
+        # Fixing the script can change these scenes, so do not send anyone into paid work yet.
         stages["shot_list"] = "waiting"
-        actions.append("`script.json` ยังใช้ไม่ได้ ต้องแก้ให้ผ่านก่อนถึงจะเริ่มทำภาพตาม `shot-list.json`")
+        actions.append("`script.json` ยังไม่ผ่าน ต้องแก้ให้เรียบร้อยก่อนถึงจะเริ่มทำภาพตาม `shot-list.json`")
     elif shots:
         stages["shot_list"] = "ready"
         for problem in problems:
@@ -791,7 +803,8 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         stages["shot_list"] = "blocked"
 
     # --- stills + animate prompts ---
-    if shots and script:
+    # Prompts are free, so they are always written; only the stages wait for a clean shot list.
+    if shots and stages["shot_list"] == "done":
         image_dir = job.path / "04-image-prompts"
         flow_dir = job.path / "05-flow-prompts"
         for shot in shots:
@@ -802,7 +815,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         write_text(image_dir / "README.md", asset_index(shots, "stills", "png"))
         write_text(flow_dir / "README.md", asset_index(shots, "clips", "mp4"))
 
-        tracked = track_shot_assets(job, shots)
+        tracked = track_shot_assets(job, shots, brief, rules)
         stills_pending = tracked["missing_stills"] + tracked["stale_stills"]
         clips_pending = tracked["missing_clips"] + tracked["stale_clips"]
         stages["stills"] = "done" if not stills_pending else "ready"
@@ -824,7 +837,10 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
 
     # --- voiceover ---
     scenes = script.get("scenes", []) if script else []
-    if scenes:
+    if scenes and not script_ok:
+        write_voice_lines(job, brief, scenes, fields_config)
+        stages["voiceover"] = "waiting"
+    elif scenes:
         write_voice_lines(job, brief, scenes, fields_config)
         voiced = [s for s in scenes if str(s.get("vo") or "").strip()]
         render_log = read_render_log(job.voice_dir)
@@ -858,6 +874,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         ready_to_cut = (
             stages["script"] == "done"
             and stages["shot_list"] == "done"
+            and stages["stills"] == "done"
             and stages["animate"] == "done"
             and stages["voiceover"] == "done"
         )
@@ -887,7 +904,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     manifest = {
         "job_id": job.path.name,
         "client_name": brief.get("client_name", ""),
-        "created_at": read_json(job.manifest_path).get("created_at") if job.manifest_path.exists() else datetime.now().isoformat(timespec="seconds"),
+        "created_at": previous_created_at(job.manifest_path),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "stages": stages,
         "next_actions": actions,
