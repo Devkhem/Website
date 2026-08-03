@@ -162,9 +162,15 @@ def build_image_prompt(series: dict) -> str:
     )
 
 
+REWRITE_MARK = "[ต้องเขียน hook ใหม่ ห้ามใช้ของเดิม]"
+
+
 def episode_package(series: dict, episode: dict, posting_time: str, decision_key: str = "no_data") -> dict:
     title = episode.get("title", "")
     hook = episode.get("hook", "")
+    if decision_key == "rewrite_hook":
+        # The old hook underperformed, so nothing downstream may reuse it as-is.
+        hook = f"{REWRITE_MARK} เดิมคือ: {hook}"
     twist = episode.get("twist", "")
     series_title = series.get("title", "")
     caption = f"{hook} ฟังให้จบแล้วบอกทีว่าคุณจะเปิดไหม"
@@ -228,7 +234,7 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
         "## ChatGPT Image Prompt",
         "",
         "```text",
-        build_image_prompt(series),
+        build_image_prompt(series) if packages else "(ไม่ออก prompt ภาพ เพราะรอบนี้ยังไม่ทำ premise นี้ต่อ)",
         "```",
         "",
         "## Production Rule",
@@ -381,14 +387,20 @@ def main() -> None:
 
     output_dir = Path(args.out) / args.date
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "chatgpt-image-prompt.txt").write_text(build_image_prompt(series), encoding="utf-8")
+    image_prompt_path = output_dir / "chatgpt-image-prompt.txt"
+    if packages:
+        image_prompt_path.write_text(build_image_prompt(series), encoding="utf-8")
+    elif image_prompt_path.exists():
+        # Following it would spend the next image on the premise we just stopped.
+        image_prompt_path.unlink()
     (output_dir / "story-channel-plan.md").write_text(
         render_markdown(account, config, series, packages, decision, args.date, exhausted), encoding="utf-8"
     )
     write_queue(output_dir / "story_posting_queue.csv", packages)
     write_episode_packages(output_dir, packages)
 
-    print(f"Created {output_dir / 'chatgpt-image-prompt.txt'}")
+    if packages:
+        print(f"Created {image_prompt_path}")
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
     print(f"Decision: {decision}")

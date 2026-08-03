@@ -235,11 +235,26 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
-def voice_fingerprint(fields_config: dict) -> str:
-    """Same recipe as generate_voiceover, so both agree on what a fresh take is."""
-    settings = fields_config.get("elevenlabs") or {}
+def voice_fingerprint(fields_config: dict, voice_dir: "Path | None" = None) -> str:
+    """Same recipe as generate_voiceover, so both agree on what a fresh take is.
+
+    A job that recorded its own voice settings keeps them; only jobs without one
+    follow the global .env value.
+    """
+    settings = dict(fields_config.get("elevenlabs") or {})
+    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
+    if voice_dir is not None:
+        chosen = voice_dir / "settings.json"
+        if chosen.exists():
+            try:
+                saved = read_json(chosen)
+            except json.JSONDecodeError:
+                saved = {}
+            if isinstance(saved, dict) and saved.get("voice_id"):
+                voice_id = str(saved["voice_id"]).strip()
+                settings.update({key: value for key, value in saved.items() if key != "voice_id" and value is not None})
     parts = [
-        f"voice={os.environ.get('ELEVENLABS_VOICE_ID', '').strip()}",
+        f"voice={voice_id}",
         f"model={settings.get('model_id', 'eleven_multilingual_v2')}",
         f"stability={settings.get('stability', 0.45)}",
         f"similarity={settings.get('similarity_boost', 0.75)}",
@@ -702,6 +717,9 @@ def shot_list_problems(script: dict, shots: list) -> list:
     if orphans:
         problems.append(f"ช็อตอ้างถึงซีนที่ไม่มีในสคริปต์: {', '.join(orphans) or '(ว่าง)'}")
     for scene_id in sorted(scene_id for scene_id in scenes if scene_id in covered):
+        count = len(covered[scene_id])
+        if count > 2:
+            problems.append(f"{scene_id} มี {count} ช็อต เกินกติกาที่ให้ซีนละ 1-2 ช็อต")
         planned = as_float(scenes[scene_id].get("duration_sec"), 0)
         total = sum(as_float(shot.get("duration_sec"), 0) for shot in covered[scene_id])
         if planned and abs(total - planned) > 1:
@@ -828,14 +846,11 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
     return result
 
 
-def export_problem(final_file: Path) -> str:
-    """Reject an interrupted export before it is offered to the client.
-
-    ffprobe is optional; without it the check is skipped rather than blocking.
-    """
+def export_problem(final_file: Path, brief: dict) -> str:
+    """Reject an export that is broken, too short, or the wrong shape for the brief."""
     probe = shutil.which("ffprobe")
     if not probe:
-        return ""
+        return "ตรวจไฟล์ไม่ได้เพราะเครื่องนี้ไม่มี ffprobe ให้ติดตั้ง ffmpeg ก่อน (brew install ffmpeg)"
     command = [
         probe, "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=codec_name,width,height", "-show_entries", "format=duration",
@@ -847,9 +862,22 @@ def export_problem(final_file: Path) -> str:
     values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if len(values) < 4:
         return "ไม่พบวิดีโอสตรีมในไฟล์"
+    width, height = as_float(values[1], 0), as_float(values[2], 0)
     duration = as_float(values[-1], 0)
     if duration < 1:
         return f"ความยาวไฟล์ {duration:g} วินาที ดูเหมือน export ค้าง"
+    target = as_float(brief.get("duration_sec"), 0)
+    if target:
+        tolerance = max(3.0, target * 0.1)
+        if abs(duration - target) > tolerance:
+            return f"ความยาว {duration:g} วินาที ไม่ตรงกับ brief {target:g} วินาที"
+    wanted = str(brief.get("aspect_ratio") or "").strip()
+    parts = re.split(r"[:xX/]", wanted)
+    if width and height and len(parts) == 2:
+        want = as_float(parts[0], 0) / as_float(parts[1], 1) if as_float(parts[1], 0) else 0
+        actual = width / height
+        if want and abs(actual - want) / want > 0.02:
+            return f"สัดส่วนภาพ {width:g}x{height:g} ไม่ตรงกับ brief {wanted}"
     return ""
 
 
@@ -870,6 +898,14 @@ def audio_extension(fields_config: dict) -> str:
         print(f"[warn] ไม่รู้จัก output_format `{fmt}` ตั้งชื่อไฟล์เป็น .mp3 ไปก่อน")
         return ".mp3"
     return suffix
+
+
+def script_scene_count_problem(brief: dict, script: dict) -> str:
+    wanted = int(as_float(brief.get("scene_count"), 0) or 0)
+    actual = len(script.get("scenes", []))
+    if wanted and actual != wanted:
+        return f"สคริปต์มี {actual} ซีน แต่ brief ขอ {wanted} ซีน"
+    return ""
 
 
 def script_duration_problem(brief: dict, script: dict) -> str:
@@ -929,11 +965,12 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     write_text(job.path / "02-script-prompt.md", script_prompt(brief, brand_bible))
     script = job.load_stage_json(job.script_path, "scenes")
     if script:
-        runtime_problem = script_duration_problem(brief, script)
+        runtime_problem = script_duration_problem(brief, script) or script_scene_count_problem(brief, script)
         script_stale = derived_is_stale(job, "script", job.script_path, script_source_fingerprint(brief, brand_bible))
-        stages["script"] = "ready" if (runtime_problem or script_stale) else "done"
+        bible_ready = stages["brand_bible"] == "done"
+        stages["script"] = "ready" if (runtime_problem or script_stale) else ("done" if bible_ready else "waiting")
         if runtime_problem:
-            actions.append(f"แก้ `script.json` หรือปรับ duration_sec ใน `brief.json`: {runtime_problem}")
+            actions.append(f"แก้ `script.json` หรือปรับ `brief.json`: {runtime_problem}")
         if script_stale:
             actions.append("brief หรือ brand bible ถูกแก้หลังเขียนสคริปต์ ให้รัน prompt ใน `02-script-prompt.md` ใหม่")
     else:
@@ -1013,7 +1050,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         write_voice_lines(job, brief, scenes, fields_config)
         voiced = [s for s in scenes if str(s.get("vo") or "").strip()]
         render_log = read_render_log(job.voice_dir)
-        voice_sha = voice_fingerprint(fields_config)
+        voice_sha = voice_fingerprint(fields_config, job.voice_dir)
         voice_assets = {str(s.get("id", "")): find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES) for s in voiced}
         stale_vo = [s for s in voiced if voice_assets[str(s.get("id", ""))] and voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))], voice_sha)]
         missing_vo = [
@@ -1049,7 +1086,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             and stages["voiceover"] == "done"
         )
         stale_export = bool(final_file) and final_file.stat().st_mtime < newest_input_mtime(job)
-        broken_export = export_problem(final_file) if (final_file and not stale_export) else ""
+        broken_export = export_problem(final_file, brief) if (final_file and not stale_export) else ""
         if broken_export:
             print(f"[note] `final/{final_file.name}` {broken_export} ต้อง export ใหม่")
             actions.append(f"ไฟล์ `final/{final_file.name}` ใช้ไม่ได้: {broken_export}")
@@ -1122,7 +1159,7 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
             elif not existing:
                 status = "todo"
             else:
-                status = "stale" if voice_is_stale(scene, render_log, existing, voice_fingerprint(fields_config)) else "done"
+                status = "stale" if voice_is_stale(scene, render_log, existing, voice_fingerprint(fields_config, job.voice_dir)) else "done"
             writer.writerow(
                 {
                     "scene_id": scene_id,
