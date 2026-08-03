@@ -41,6 +41,8 @@ EPISODES = [
             (15.8, 20.0, "แต่โทรศัพท์เด้งขึ้นมา", "“เปิดหน่อย หนาวมาก”"),
             (20.0, 22.0, "ถ้าเป็นคุณ", "จะเปิดไหม?"),
         ],
+        "phone_beats": [4],
+        "phone_context": ("ไม่ทราบชื่อ", "อยู่ห้อง 407 ใช่ไหม"),
         "caption": "อย่าเปิดประตูหลังตี 3 ฟังให้จบแล้วบอกทีว่าคุณจะเปิดไหม",
     },
     {
@@ -54,6 +56,8 @@ EPISODES = [
             (16.4, 20.0, "แต่ผมมองไปแล้ว", "ในเงาประตูมีคนยืนอยู่"),
             (20.0, 22.0, "แล้วแชตสุดท้ายก็ขึ้น", "“เขาเห็นคุณแล้ว”"),
         ],
+        "phone_beats": [1, 3, 5],
+        "phone_context": ("รูมเมตเก่า", "คุณอยู่คนเดียวใช่ไหม"),
         "caption": "เบอร์ที่ปิดไปแล้ว ส่งข้อความมา ถ้าเจอแบบนี้คุณจะทำยังไง",
     },
     {
@@ -67,6 +71,8 @@ EPISODES = [
             (16.2, 20.0, "ข้อความสุดท้ายส่งมา", "“ไม่ต้องเปิดแล้ว”"),
             (20.0, 22.0, "“เราเข้ามาแล้ว”", "คืนนี้อย่าหันไปมองกระจก"),
         ],
+        "phone_beats": [3, 4, 5],
+        "phone_context": ("ไม่ทราบชื่อ", "อย่ามองกระจก"),
         "caption": "ผมไม่เห็นใครหน้าห้อง แต่กระจกเห็น ตอนจบคือไม่โอเคเลย",
     },
 ]
@@ -109,7 +115,7 @@ def find_thai_font(explicit: str = "") -> str:
         if not Path(explicit).exists():
             raise SystemExit(f"ไม่พบไฟล์ฟอนต์: {explicit}")
         if not renders_thai(explicit):
-            print(f"[warn] {explicit} อาจไม่มีตัวอักษรไทย ตัวหนังสืออาจกลายเป็นกล่องสี่เหลี่ยม")
+            raise SystemExit(f"{explicit} วาดตัวอักษรไทยไม่ได้ ตัวหนังสือจะกลายเป็นกล่องสี่เหลี่ยม\n{FONT_HELP}")
         return explicit
     for item in FONT_CANDIDATES:
         if Path(item).exists() and renders_thai(item):
@@ -259,15 +265,16 @@ def background(bg: Image.Image, sec: float, episode_index: int, beat_index: int)
     return Image.alpha_composite(crop, dark)
 
 
-def draw_phone_overlay(draw: ImageDraw.ImageDraw, local: float, message: str):
+def draw_phone_overlay(draw: ImageDraw.ImageDraw, local: float, message: str, context=None):
     x, y, w, h = 86, 326, 548, 480
     rounded(draw, (x, y, x + w, y + h), 38, (7, 9, 14, 224), (150, 160, 175, 118), 3)
     rounded(draw, (x + 24, y + 36, x + w - 24, y + h - 28), 26, (12, 17, 27, 238))
     draw.text((x + 52, y + 64), "ข้อความ", font=F30, fill=INK)
     draw.text((x + w - 54, y + 68), "03:07", font=F26, fill=MUTED, anchor="ra")
     rounded(draw, (x + 50, y + 144, x + w - 50, y + 236), 24, (30, 43, 62, 250))
-    draw.text((x + 78, y + 163), "ห้อง 407", font=F26, fill=MUTED)
-    draw.text((x + 78, y + 196), "คุณอยู่คนเดียวใช่ไหม", font=F30, fill=INK)
+    sender, previous = context or ("ไม่ทราบชื่อ", "คุณอยู่คนเดียวใช่ไหม")
+    draw.text((x + 78, y + 163), sender, font=F26, fill=MUTED)
+    draw.text((x + 78, y + 196), previous, font=F30, fill=INK)
     show = int(len(message) * ease(local))
     rounded(draw, (x + 50, y + 292, x + w - 50, y + 392), 26, (74, 25, 43, 255), (255, 49, 92, 210), 3)
     draw.text((x + 78, y + 322), message[:show], font=F38, fill=INK)
@@ -298,8 +305,8 @@ def draw_frame(bg: Image.Image, episode: dict, episode_index: int, frame: int) -
         center(draw, title, 370 + shake, F60, INK, stroke=2)
         rounded(draw, (120, 636, 600, 722), 43, (255, 49, 92, 226))
         draw.text((360, 660), sub, font=F38, fill=INK, anchor="ma")
-    elif episode_index in {1, 2} and beat_index in {1, 4, 5}:
-        draw_phone_overlay(draw, local, sub.replace("“", "").replace("”", ""))
+    elif beat_index in episode.get("phone_beats", ()):
+        draw_phone_overlay(draw, local, sub.replace("“", "").replace("”", ""), episode.get("phone_context"))
         subtitle(draw, title, sub, local, danger=True)
     else:
         subtitle(draw, title, sub, local, danger=beat_index >= 4)

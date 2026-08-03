@@ -63,7 +63,10 @@ def read_latest_metrics(path: Path, series_id: str) -> list:
     if two_hour:
         return two_hour
     if rows and any("measured_after_hours" in row for row in rows):
-        print("[warn] ยังไม่มีแถวที่วัดที่ 2 ชั่วโมง ใช้แถวล่าสุดแทน ค่าที่ได้อาจไม่ตรงกับเกณฑ์")
+        # The column exists, so a missing 2h row is missing data — not a reason to
+        # judge 24h numbers against thresholds named for two hours.
+        print("[warn] ยังไม่มีแถวที่วัดตอน 2 ชั่วโมง จึงยังไม่ตัดสินใจจาก retention รอบนี้")
+        return []
     return rows
 
 

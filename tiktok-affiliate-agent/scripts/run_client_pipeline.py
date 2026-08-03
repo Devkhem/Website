@@ -19,6 +19,8 @@ import io
 import json
 import math
 import re
+import shutil
+import subprocess
 import sys
 import urllib.request
 from datetime import date, datetime
@@ -114,15 +116,26 @@ def normalize_ids(entries: list, prefix: str, extra_keys: list = ()) -> None:
                 entry[key] = safe
 
 
-def entries_are_valid(entries: list, key: str, name: str) -> bool:
-    """Ids must stay unique after normalization and durations must be numbers.
+REQUIRED_ENTRY_KEYS = {
+    "scenes": ["id", "beat", "vo", "duration_sec"],
+    "shots": ["id", "scene_id", "description", "duration_sec"],
+}
 
-    Both feed filenames and arithmetic later, where a duplicate would let one asset
-    satisfy two entries and a `"three"` would abort `sync` with a ValueError.
+
+def entries_are_valid(entries: list, key: str, name: str) -> bool:
+    """Every entry must carry the schema keys, a unique id and a positive duration.
+
+    A truncated scene without `vo` would otherwise pass as an intentionally silent
+    scene, and a duplicate id would let one asset satisfy two entries.
     """
     ok = True
     seen = set()
+    required = REQUIRED_ENTRY_KEYS.get(key, ["id", "duration_sec"])
     for entry in entries:
+        missing = [field for field in required if field not in entry]
+        if missing:
+            print(f"[warn] {name} `{entry.get('id', '?')}` ขาดคีย์ {', '.join(missing)} ตาม schema")
+            ok = False
         entry_id = str(entry.get("id") or "")
         if entry_id in seen:
             print(f"[warn] {name} มี id ซ้ำใน `{key}`: `{entry_id}` ต้องไม่ซ้ำเพราะใช้เป็นชื่อไฟล์")
@@ -787,6 +800,31 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
     return result
 
 
+def export_problem(final_file: Path) -> str:
+    """Reject an interrupted export before it is offered to the client.
+
+    ffprobe is optional; without it the check is skipped rather than blocking.
+    """
+    probe = shutil.which("ffprobe")
+    if not probe:
+        return ""
+    command = [
+        probe, "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name,width,height", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(final_file),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        return f"อ่านไฟล์ไม่ได้: {result.stderr.strip().splitlines()[-1] if result.stderr.strip() else 'ffprobe ล้มเหลว'}"
+    values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(values) < 4:
+        return "ไม่พบวิดีโอสตรีมในไฟล์"
+    duration = as_float(values[-1], 0)
+    if duration < 1:
+        return f"ความยาวไฟล์ {duration:g} วินาที ดูเหมือน export ค้าง"
+    return ""
+
+
 def newest_input_mtime(job: Job) -> float:
     """Latest change among the things a Premiere export is built from."""
     paths = [job.script_path, job.shot_list_path, job.brief_path, job.brand_bible_path]
@@ -982,7 +1020,11 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             and stages["voiceover"] == "done"
         )
         stale_export = bool(final_file) and final_file.stat().st_mtime < newest_input_mtime(job)
-        if final_file and ready_to_cut and not stale_export:
+        broken_export = export_problem(final_file) if (final_file and not stale_export) else ""
+        if broken_export:
+            print(f"[note] `final/{final_file.name}` {broken_export} ต้อง export ใหม่")
+            actions.append(f"ไฟล์ `final/{final_file.name}` ใช้ไม่ได้: {broken_export}")
+        if final_file and ready_to_cut and not stale_export and not broken_export:
             stages["edit"] = "done"
         elif ready_to_cut:
             stages["edit"] = "ready"
@@ -1003,6 +1045,10 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         actions.append("ส่ง `07-review-packet.md` + ไฟล์ใน `final/` ให้ลูกค้ารีวิว")
     else:
         stages["review"] = "blocked"
+        packet = job.path / "07-review-packet.md"
+        if packet.exists():
+            packet.unlink()
+            print("[note] ลบ `07-review-packet.md` เดิมทิ้ง เพราะยังส่งรีวิวไม่ได้แล้ว")
 
     manifest = {
         "job_id": job.path.name,
