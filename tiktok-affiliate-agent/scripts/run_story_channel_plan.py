@@ -439,7 +439,13 @@ def main() -> None:
     latest_posted = max(posted) if posted else 0
     measured_at_two_hours = posted_episodes(metrics)
     awaiting_metric = bool(posted) and latest_posted not in measured_at_two_hours
-    deciding_rows = [row for row in metrics if episode_number(row) == latest_posted] if latest_posted else metrics
+    deciding_rows = [row for row in metrics if episode_number(row) == latest_posted] if latest_posted else list(metrics)
+    # Sheets get re-sorted; the newest measurement is the one with the latest date.
+    deciding_rows = sorted(
+        enumerate(deciding_rows),
+        key=lambda pair: (str(pair[1].get("date") or ""), pair[0]),
+    )
+    deciding_rows = [row for _, row in deciding_rows]
     decision_key, decision = decision_from_metrics(config, deciding_rows)
     target_episode = latest_posted or latest_episode_number(deciding_rows)
     exhausted = decision_key != "kill" and not [

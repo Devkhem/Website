@@ -967,10 +967,12 @@ def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str, stamp: 
     stamp = stamp or (content_identity(derived) if derived.exists() else "")
     entry = log.get(key) if isinstance(log.get(key), dict) else {}
     if entry and entry.get("v") != SOURCE_LOG_VERSION:
-        # A tool-template change moved the fingerprint, so the old hash cannot be
-        # compared. Carry the verdict we already recorded, and for a stale one leave
-        # the hash empty so it stays stale until the derived file is rewritten.
-        carried = bool(entry.get("stale"))
+        # Only the export fingerprint changed recipe in this version, so its verdict
+        # has to be carried. Every other entry can still compare its recorded hash.
+        if key == "final" or not entry.get("source_sha"):
+            carried = bool(entry.get("stale"))
+        else:
+            carried = entry["source_sha"] != source_sha
         log[key] = {
             "stamp": stamp,
             "source_sha": "" if carried else source_sha,
@@ -1127,15 +1129,30 @@ def content_identity(path: Path) -> str:
     return f"{path.name}:{size}:{digest}"
 
 
-def export_inputs_fingerprint(job: Job) -> str:
+def export_inputs_fingerprint(job: Job, shots: list = (), scenes: list = ()) -> str:
     """Everything a Premiere export is built from, by content rather than timestamp.
 
     `final_file` is an operational choice about which cut to review, not an input to
     the cut, so it is excluded — otherwise naming a file would make it stale.
     """
     paths = [job.script_path, job.shot_list_path, job.brand_bible_path]
-    paths += matching_files(job.clips_dir, CLIP_SUFFIXES)
-    paths += matching_files(job.voice_dir, AUDIO_SUFFIXES)
+    if shots or scenes:
+        # Deleting a clip that the current cut does not use must not age the export.
+        paths += [
+            asset
+            for shot in shots
+            for asset in [find_asset(job.clips_dir, str(shot.get("id") or ""), CLIP_SUFFIXES)]
+            if asset
+        ]
+        paths += [
+            asset
+            for scene in scenes
+            for asset in [find_asset(job.voice_dir, str(scene.get("id") or ""), AUDIO_SUFFIXES)]
+            if asset
+        ]
+    else:
+        paths += matching_files(job.clips_dir, CLIP_SUFFIXES)
+        paths += matching_files(job.voice_dir, AUDIO_SUFFIXES)
     parts = sorted(content_identity(path) for path in paths if path.exists())
     brief = {key: value for key, value in job.brief.items() if key != "final_file"}
     parts.append("brief:" + json.dumps(brief, ensure_ascii=False, sort_keys=True))
@@ -1394,7 +1411,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             and stages["voiceover"] == "done"
         )
         stale_export = bool(final_file) and derived_is_stale(
-            job, "final", final_file, export_inputs_fingerprint(job), content_digest(final_file)
+            job, "final", final_file, export_inputs_fingerprint(job, shots, scenes), content_digest(final_file)
         )
         broken_export = export_problem(final_file, brief) if (final_file and not stale_export) else ""
         if broken_export:
