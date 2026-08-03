@@ -62,7 +62,7 @@ AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
 # ElevenLabs output_format prefix -> the extension its bytes actually deserve.
 AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 FINAL_SUFFIXES = [".mp4", ".mov"]
-ASSET_LOG_VERSION = 4
+ASSET_LOG_VERSION = 5
 # Bump when a prompt template changes, so existing jobs adopt the new fingerprint
 # instead of being told their script is stale by a tool update.
 SOURCE_LOG_VERSION = 3
@@ -1027,8 +1027,7 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
                 result["missing_" + kind + "s"].append(shot_id)
                 record.pop(kind, None)
                 continue
-            info = asset.stat()
-            stamp = f"{asset.name}:{info.st_mtime_ns}:{info.st_size}"
+            stamp = content_identity(asset)
             entry = record.get(kind) if isinstance(record.get(kind), dict) else {}
             if entry.get("asset") != stamp or entry.get("v") != ASSET_LOG_VERSION:
                 # New asset, or a record written before the current fingerprint scheme:
@@ -1048,7 +1047,8 @@ def export_problem(final_file: Path, brief: dict) -> str:
         return "ตรวจไฟล์ไม่ได้เพราะเครื่องนี้ไม่มี ffprobe ให้ติดตั้ง ffmpeg ก่อน (brew install ffmpeg)"
     command = [
         probe, "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=codec_name,width,height", "-show_entries", "format=duration",
+        "-show_entries", "stream=codec_name,width,height,duration",
+        "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", str(final_file),
     ]
     result = subprocess.run(command, capture_output=True, text=True)
@@ -1067,12 +1067,15 @@ def export_problem(final_file: Path, brief: dict) -> str:
     if len(values) < 4:
         return "ไม่พบวิดีโอสตรีมในไฟล์"
     width, height = as_float(values[1], 0), as_float(values[2], 0)
+    video_seconds = as_float(values[3], 0) if len(values) > 4 else 0
     duration = as_float(values[-1], 0)
     if duration < 1:
         return f"ความยาวไฟล์ {duration:g} วินาที ดูเหมือน export ค้าง"
     audio_seconds = as_float(audio_values[-1], 0)
     if duration and audio_seconds and duration - audio_seconds > max(1.5, duration * 0.1):
         return f"เสียงยาวแค่ {audio_seconds:g} วินาที จากคลิป {duration:g} วินาที คลิปเงียบเกือบทั้งเรื่อง"
+    if duration and video_seconds and duration - video_seconds > max(1.5, duration * 0.1):
+        return f"ภาพยาวแค่ {video_seconds:g} วินาที จากคลิป {duration:g} วินาที ภาพจบก่อนเสียง"
     target = as_float(brief.get("duration_sec"), 0)
     if target:
         tolerance = max(3.0, target * 0.1)

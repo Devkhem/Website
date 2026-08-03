@@ -187,20 +187,16 @@ def looks_like_audio(path: Path, settings: dict) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def find_existing_audio(directory: Path, stem: str, settings: dict) -> "Path | None":
-    """Any usable recording counts, whatever its case or extension."""
+def existing_takes(directory: Path, stem: str, settings: dict) -> list:
+    """Every usable recording for this scene, whatever its case or extension."""
     if not stem or not directory.exists():
-        return None
-    matches = [
+        return []
+    return [
         item
         for item in directory.iterdir()
         if item.is_file() and item.stem == stem and item.suffix.lower() in AUDIO_SUFFIXES
         and looks_like_audio(item, settings)
     ]
-    if not matches:
-        return None
-    # Newest wins, same as the pipeline's asset lookup.
-    return max(matches, key=lambda item: (item.stat().st_mtime_ns, item.name))
 
 
 def read_lines(path: Path) -> list:
@@ -276,6 +272,7 @@ def main(argv: "list | None" = None) -> None:
 
     render_log = read_render_log(voice_dir)
     pending = []
+    blocked = 0
     for row in rows:
         scene_id = str(row.get("scene_id") or "").strip()
         text = str(row.get("vo_text") or "").strip()
@@ -284,10 +281,14 @@ def main(argv: "list | None" = None) -> None:
         if not text:
             print(f"[skip] {scene_id} ไม่มีข้อความพูด")
             continue
-        existing = (
-            find_existing_audio(voice_dir, scene_id, settings)
-            or find_existing_audio(voice_dir, output.stem, settings)
-        )
+        takes = existing_takes(voice_dir, scene_id, settings) or existing_takes(voice_dir, output.stem, settings)
+        if len(takes) > 1:
+            # The pipeline refuses to pick between them, so recording a third would
+            # only deepen the ambiguity.
+            print(f"[block] {scene_id} มีไฟล์เสียงซ้ำ: {', '.join(sorted(item.name for item in takes))} ให้เหลือไฟล์เดียวก่อน")
+            blocked += 1
+            continue
+        existing = takes[0] if takes else None
         record = render_log.get(scene_id) if isinstance(render_log.get(scene_id), dict) else {}
         # A manual take is not ours to call stale, even when it kept our filename.
         record_matches = not record.get("file") or (existing is not None and record["file"] == existing.name)
@@ -313,6 +314,8 @@ def main(argv: "list | None" = None) -> None:
     if not pending:
         # Nothing to synthesize, so a rerun must not fail on missing credentials.
         print("ไม่มีซีนที่ต้องอัดเพิ่ม")
+        if blocked:
+            raise SystemExit(1)
         return
 
     if not args.execute:
@@ -344,7 +347,8 @@ def main(argv: "list | None" = None) -> None:
             print(f"[fail] {scene_id}: {reason}")
             failed += 1
             continue
-        staging = output.with_name(output.name + ".part")
+        # Keep the real suffix last: raw formats are judged by their extension.
+        staging = output.with_name(f"{output.stem}.part{output.suffix}")
         staging.write_bytes(audio)
         if not looks_like_audio(staging, settings):
             staging.unlink(missing_ok=True)
@@ -380,7 +384,7 @@ def main(argv: "list | None" = None) -> None:
     print(f"สำเร็จ {len(pending) - failed}/{len(pending)} ซีน")
     fields_flag = f' --fields "{args.fields}"' if Path(args.fields) != DEFAULT_FIELDS else ""
     print(f'รัน `python3 scripts/run_client_pipeline.py{fields_flag} sync "{job_path}"` เพื่ออัปเดตสถานะ')
-    if failed:
+    if failed or blocked:
         # Exit nonzero so a shell pipeline does not treat a failed batch as done.
         raise SystemExit(1)
 
