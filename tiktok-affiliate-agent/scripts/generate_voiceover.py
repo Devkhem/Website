@@ -9,7 +9,10 @@ import hashlib
 import http.client
 import json
 import os
+import re
+import shutil
 import socket
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -135,20 +138,44 @@ RAW_AUDIO_SUFFIXES = {".pcm", ".ulaw", ".alaw"}
 MIN_AUDIO_BYTES = 512
 
 
-def looks_like_audio(path: Path) -> bool:
-    """Same bar the pipeline applies, so a rejected take is re-recorded here."""
+def raw_bytes_per_second(settings: dict) -> int:
+    fmt = str(settings.get("output_format", "")).lower()
+    match = re.match(r"(pcm|ulaw|alaw)_(\d+)", fmt)
+    if not match:
+        return 0
+    rate = int(match.group(2))
+    return rate * 2 if match.group(1) == "pcm" else rate
+
+
+def looks_like_audio(path: Path, settings: dict) -> bool:
+    """Same bar the pipeline applies, so a take it rejected is re-recorded here.
+
+    Without that agreement, `sync` reports a scene as missing while this command
+    says it already exists, and the operator is stuck in the middle.
+    """
     if path.stat().st_size < MIN_AUDIO_BYTES:
         return False
     if path.suffix.lower() in RAW_AUDIO_SUFFIXES:
-        return True
+        bps = raw_bytes_per_second(settings)
+        return bps > 0 and path.stat().st_size >= bps * 0.5
     try:
         head = path.open("rb").read(16)
     except OSError:
         return False
-    return any(signature in head for signature in AUDIO_SIGNATURES)
+    if not any(signature in head for signature in AUDIO_SIGNATURES):
+        return False
+    probe = shutil.which("ffprobe")
+    if not probe:
+        return False  # the pipeline will not trust it either
+    result = subprocess.run(
+        [probe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def find_existing_audio(directory: Path, stem: str) -> "Path | None":
+def find_existing_audio(directory: Path, stem: str, settings: dict) -> "Path | None":
     """Any usable recording counts, whatever its case or extension."""
     if not stem or not directory.exists():
         return None
@@ -156,7 +183,7 @@ def find_existing_audio(directory: Path, stem: str) -> "Path | None":
         item
         for item in directory.iterdir()
         if item.is_file() and item.stem == stem and item.suffix.lower() in AUDIO_SUFFIXES
-        and looks_like_audio(item)
+        and looks_like_audio(item, settings)
     ]
     if not matches:
         return None
@@ -245,7 +272,10 @@ def main(argv: "list | None" = None) -> None:
         if not text:
             print(f"[skip] {scene_id} ไม่มีข้อความพูด")
             continue
-        existing = find_existing_audio(voice_dir, scene_id) or find_existing_audio(voice_dir, output.stem)
+        existing = (
+            find_existing_audio(voice_dir, scene_id, settings)
+            or find_existing_audio(voice_dir, output.stem, settings)
+        )
         record = render_log.get(scene_id) if isinstance(render_log.get(scene_id), dict) else {}
         # A manual take is not ours to call stale, even when it kept our filename.
         record_matches = not record.get("file") or (existing is not None and record["file"] == existing.name)

@@ -1024,11 +1024,13 @@ def export_problem(final_file: Path, brief: dict) -> str:
     if result.returncode != 0:
         return f"อ่านไฟล์ไม่ได้: {result.stderr.strip().splitlines()[-1] if result.stderr.strip() else 'ffprobe ล้มเหลว'}"
     audio = subprocess.run(
-        [probe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+        [probe, "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=codec_name,duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(final_file)],
         capture_output=True, text=True,
     )
-    if audio.returncode != 0 or not audio.stdout.strip():
+    audio_values = [line.strip() for line in audio.stdout.splitlines() if line.strip()]
+    if audio.returncode != 0 or not audio_values:
         return "ไฟล์ไม่มีเสียง ต้อง export พร้อม voice-over และเพลงประกอบ"
     values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if len(values) < 4:
@@ -1037,6 +1039,9 @@ def export_problem(final_file: Path, brief: dict) -> str:
     duration = as_float(values[-1], 0)
     if duration < 1:
         return f"ความยาวไฟล์ {duration:g} วินาที ดูเหมือน export ค้าง"
+    audio_seconds = as_float(audio_values[-1], 0)
+    if duration and audio_seconds and duration - audio_seconds > max(1.5, duration * 0.1):
+        return f"เสียงยาวแค่ {audio_seconds:g} วินาที จากคลิป {duration:g} วินาที คลิปเงียบเกือบทั้งเรื่อง"
     target = as_float(brief.get("duration_sec"), 0)
     if target:
         tolerance = max(3.0, target * 0.1)
@@ -1230,8 +1235,18 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         write_text(flow_dir / "README.md", prompt_sheet(shots, flow_prompts, "clips", "mp4", "Prompt สำหรับ Google Flow ทั้งหมด"))
 
         tracked = track_shot_assets(job, shots, brief, rules)
+        short_clips = []
+        for shot in shots:
+            shot_id = str(shot.get("id") or "")
+            planned = as_float(shot.get("duration_sec"), 0)
+            clip = checked_asset(job.clips_dir, shot_id, CLIP_SUFFIXES, "clip")
+            if not clip or planned <= 0:
+                continue
+            actual = media_duration(clip)
+            if actual and planned - actual > max(0.5, planned * 0.1):
+                short_clips.append((shot_id, planned - actual))
         stills_pending = tracked["missing_stills"] + tracked["stale_stills"]
-        clips_pending = tracked["missing_clips"] + tracked["stale_clips"]
+        clips_pending = tracked["missing_clips"] + tracked["stale_clips"] + [item[0] for item in short_clips]
         stages["stills"] = "done" if not stills_pending else "ready"
         stages["animate"] = "done" if not clips_pending else ("ready" if not stills_pending else "waiting")
         for kind, label, pending, stale in (
@@ -1242,6 +1257,9 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
                 continue
             if stale:
                 print(f"[note] {kind} ของช็อต {', '.join(stale)} ทำมาจาก shot list เวอร์ชันเก่า ต้องทำใหม่")
+            if kind == "clips" and short_clips:
+                for shot_id, missing_seconds in short_clips:
+                    print(f"[note] clips/{shot_id} สั้นกว่าช็อตอยู่ {missing_seconds:.1f} วินาที ต้อง animate ใหม่ให้ครบ")
             if kind == "stills" or stages["animate"] == "ready":
                 folder = "04-image-prompts" if kind == "stills" else "05-flow-prompts"
                 actions.append(f"{label} {len(pending)} ช็อตที่ยังไม่พร้อม แล้ววางใน `{kind}/` (ดู `{folder}/`)")
