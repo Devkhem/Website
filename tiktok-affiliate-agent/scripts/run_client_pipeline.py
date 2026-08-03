@@ -204,6 +204,35 @@ def decodes(path: Path, kind: str) -> bool:
 
 
 _MEDIA_VERDICTS = {}
+_DURATIONS = {}
+
+
+def media_duration(path: Path) -> float:
+    """Seconds of media, or 0 when ffprobe is unavailable or unsure."""
+    probe = shutil.which("ffprobe")
+    if not probe:
+        return 0.0
+    key = (str(path), asset_stamp(path))
+    if key not in _DURATIONS:
+        result = subprocess.run(
+            [probe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True,
+        )
+        _DURATIONS[key] = as_float(result.stdout.strip(), 0) if result.returncode == 0 else 0.0
+    return _DURATIONS[key]
+
+
+def voice_overruns_scene(scene: dict, asset: "Path | None") -> float:
+    """How many seconds the take is longer than the scene it has to sit in."""
+    planned = as_float(scene.get("duration_sec"), 0)
+    if asset is None or planned <= 0:
+        return 0.0
+    spoken = media_duration(asset)
+    if spoken <= 0:
+        return 0.0
+    tolerance = max(1.0, planned * 0.2)
+    return spoken - planned if spoken - planned > tolerance else 0.0
 
 
 def usable_asset(path: "Path | None", kind: str) -> bool:
@@ -1179,13 +1208,23 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             str(s.get("id", "")): checked_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES, "audio")
             for s in voiced
         }
+        overrunning = [
+            (s, voice_overruns_scene(s, voice_assets[str(s.get("id", ""))]))
+            for s in voiced
+        ]
+        overrunning = [(s, extra) for s, extra in overrunning if extra > 0]
         stale_vo = [s for s in voiced if voice_assets[str(s.get("id", ""))] and voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))], voice_sha)]
         missing_vo = [
             s
             for s in voiced
             if not voice_assets[str(s.get("id", ""))] or voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))], voice_sha)
         ]
-        stages["voiceover"] = "done" if not missing_vo else "ready"
+        stages["voiceover"] = "done" if not (missing_vo or overrunning) else "ready"
+        for scene, extra in overrunning:
+            actions.append(
+                f"เสียงของ {scene.get('id')} ยาวเกินซีนอยู่ {extra:.1f} วินาที "
+                f"ให้ตัดบทให้สั้นลงหรือขยาย duration_sec ของซีน"
+            )
         if stale_vo:
             print(f"[note] {len(stale_vo)} ซีนมีเสียงเก่าที่อัดจากสคริปต์คนละเวอร์ชัน ต้องอัดใหม่: {', '.join(str(s.get('id')) for s in stale_vo)}")
         if missing_vo:

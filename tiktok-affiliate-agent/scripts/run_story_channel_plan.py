@@ -402,6 +402,10 @@ def render_episode_package(package: dict[str, str]) -> str:
 def validate_date(value: str) -> str:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
         raise SystemExit(f"--date ต้องเป็นรูปแบบ YYYY-MM-DD เท่านั้น แต่ได้: {value}")
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise SystemExit(f"--date ไม่ใช่วันที่ที่มีอยู่จริง: {value}")
     return value
 
 

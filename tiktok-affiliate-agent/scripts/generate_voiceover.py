@@ -33,12 +33,14 @@ def load_dotenv(path: Path) -> None:
 
 
 def resolve_job(jobs_root: str, job_id: str) -> Path:
-    path = Path(job_id)
+    """A bare id resolves under --jobs first; only an explicit path is taken as one."""
+    if job_id == Path(job_id).name:
+        candidate = Path(jobs_root) / job_id
+        if candidate.is_dir():
+            return candidate
+    path = Path(job_id).expanduser()
     if path.is_dir():
         return path
-    candidate = Path(jobs_root) / job_id
-    if candidate.is_dir():
-        return candidate
     raise SystemExit(f"ไม่พบงาน: {job_id}")
 
 
@@ -94,9 +96,7 @@ def write_voice_override(voice_dir: Path, voice_id: str) -> None:
     Model, stability and format stay in the shared config on purpose: changing them
     there must still retire the takes rendered with the old values.
     """
-    (voice_dir / "settings.json").write_text(
-        json.dumps({"voice_id": voice_id}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    write_json_atomic(voice_dir / "settings.json", {"voice_id": voice_id})
 
 
 def read_render_log(voice_dir: Path) -> dict:
@@ -111,9 +111,15 @@ def read_render_log(voice_dir: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def write_json_atomic(path: Path, payload: dict) -> None:
+    """A truncated log reads as empty, which would quietly bless every old take."""
+    staging = path.with_name(path.name + ".part")
+    staging.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(staging, path)
+
+
 def write_render_log(voice_dir: Path, log: dict) -> None:
-    path = voice_dir / "rendered.json"
-    path.write_text(json.dumps(log, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(voice_dir / "rendered.json", log)
 
 
 def asset_stamp(asset: "Path | None") -> str:
