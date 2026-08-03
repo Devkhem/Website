@@ -1029,9 +1029,12 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
                 continue
             stamp = content_identity(asset)
             entry = record.get(kind) if isinstance(record.get(kind), dict) else {}
-            if entry.get("asset") != stamp or entry.get("v") != ASSET_LOG_VERSION:
-                # New asset, or a record written before the current fingerprint scheme:
-                # adopt what is on disk instead of raising a false alarm.
+            if entry.get("v") != ASSET_LOG_VERSION and entry.get("sha"):
+                # Only the stamp representation changed: keep the recorded fingerprint
+                # so a shot whose definition moved stays stale.
+                entry = {"asset": stamp, "sha": entry["sha"], "v": ASSET_LOG_VERSION}
+                record[kind] = entry
+            if entry.get("asset") != stamp or not entry.get("sha"):
                 record[kind] = {"asset": stamp, "sha": fingerprint, "v": ASSET_LOG_VERSION}
             elif entry.get("sha") != fingerprint:
                 result["stale_" + kind + "s"].append(shot_id)
@@ -1116,11 +1119,18 @@ def content_identity(path: Path) -> str:
 
 
 def export_inputs_fingerprint(job: Job) -> str:
-    """Everything a Premiere export is built from, by content rather than timestamp."""
-    paths = [job.script_path, job.shot_list_path, job.brief_path, job.brand_bible_path]
+    """Everything a Premiere export is built from, by content rather than timestamp.
+
+    `final_file` is an operational choice about which cut to review, not an input to
+    the cut, so it is excluded — otherwise naming a file would make it stale.
+    """
+    paths = [job.script_path, job.shot_list_path, job.brand_bible_path]
     paths += matching_files(job.clips_dir, CLIP_SUFFIXES)
     paths += matching_files(job.voice_dir, AUDIO_SUFFIXES)
-    return text_fingerprint("\n".join(sorted(content_identity(path) for path in paths if path.exists())))
+    parts = sorted(content_identity(path) for path in paths if path.exists())
+    brief = {key: value for key, value in job.brief.items() if key != "final_file"}
+    parts.append("brief:" + json.dumps(brief, ensure_ascii=False, sort_keys=True))
+    return text_fingerprint("\n".join(parts))
 
 
 def audio_extension(fields_config: dict) -> str:
@@ -1614,7 +1624,7 @@ def archive_derived(job: Job) -> list:
         for item in sorted(job.path.iterdir())
         if item.name != job.brief_path.name and not item.name.startswith("archive-")
     ]
-    if not items:
+    if not items and not job.brief_path.exists():
         return []
     # The old brief stays in place for cmd_new to overwrite, but the archive keeps a
     # copy so the archived work can still be audited against what was asked for.

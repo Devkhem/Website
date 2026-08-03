@@ -187,15 +187,17 @@ def looks_like_audio(path: Path, settings: dict) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def existing_takes(directory: Path, stem: str, settings: dict) -> list:
-    """Every usable recording for this scene, whatever its case or extension."""
+def sibling_takes(directory: Path, stem: str) -> list:
+    """Every supported audio file for this scene, valid or not.
+
+    A corrupt sibling still blocks the pipeline's lookup, so it has to count here too.
+    """
     if not stem or not directory.exists():
         return []
     return [
         item
         for item in directory.iterdir()
         if item.is_file() and item.stem == stem and item.suffix.lower() in AUDIO_SUFFIXES
-        and looks_like_audio(item, settings)
     ]
 
 
@@ -281,14 +283,14 @@ def main(argv: "list | None" = None) -> None:
         if not text:
             print(f"[skip] {scene_id} ไม่มีข้อความพูด")
             continue
-        takes = existing_takes(voice_dir, scene_id, settings) or existing_takes(voice_dir, output.stem, settings)
+        takes = sibling_takes(voice_dir, scene_id) or sibling_takes(voice_dir, output.stem)
         if len(takes) > 1:
             # The pipeline refuses to pick between them, so recording a third would
             # only deepen the ambiguity.
             print(f"[block] {scene_id} มีไฟล์เสียงซ้ำ: {', '.join(sorted(item.name for item in takes))} ให้เหลือไฟล์เดียวก่อน")
             blocked += 1
             continue
-        existing = takes[0] if takes else None
+        existing = takes[0] if takes and looks_like_audio(takes[0], settings) else None
         record = render_log.get(scene_id) if isinstance(render_log.get(scene_id), dict) else {}
         # A manual take is not ours to call stale, even when it kept our filename.
         record_matches = not record.get("file") or (existing is not None and record["file"] == existing.name)

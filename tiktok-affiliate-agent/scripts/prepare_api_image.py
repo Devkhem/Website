@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 from pathlib import Path
 
 from PIL import Image, ImageFilter, ImageOps
@@ -87,16 +88,20 @@ def save_under_limit(image: Image.Image, output_path: Path, max_bytes: int) -> t
     size = image.width
     current = image
     fmt = output_format(output_path)
+    # Write attempts beside the target: a failed run must not destroy a good result.
+    staging = output_path.with_name(f'{output_path.stem}.part{output_path.suffix}')
     while True:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        current.save(output_path, format=fmt, optimize=True)
-        bytes_written = output_path.stat().st_size
+        current.save(staging, format=fmt, optimize=True)
+        bytes_written = staging.stat().st_size
         if bytes_written <= max_bytes:
+            os.replace(staging, output_path)
             return size, bytes_written
         if size <= MIN_SIZE:
+            staging.unlink(missing_ok=True)
             raise SystemExit(
                 f'ย่อจนถึง {size}x{size} แล้วยังได้ {bytes_written / (1024 * 1024):.2f} MB '
-                f'ซึ่งเกิน --max-mb ที่ตั้งไว้ ไฟล์ที่เขียนไว้คือ {output_path} '
+                f'ซึ่งเกิน --max-mb ที่ตั้งไว้ ไม่ได้เขียนทับ {output_path} '
                 f'ให้เพิ่ม --max-mb หรือใช้ภาพต้นทางที่รายละเอียดน้อยลง'
             )
         size = max(MIN_SIZE, int(size * 0.9))
