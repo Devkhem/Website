@@ -169,12 +169,38 @@ RAW_AUDIO_SUFFIXES = {".pcm", ".ulaw", ".alaw"}
 MIN_MEDIA_BYTES = 512
 
 
-def usable_asset(path: "Path | None", kind: str) -> bool:
-    """A placeholder or a saved error page is not an asset.
+def decodes(path: Path, kind: str) -> bool:
+    """Decode the file, so a download truncated after its header is caught."""
+    if kind == "image":
+        try:
+            from PIL import Image  # optional: only needed for the deeper check
+        except ImportError:
+            return True
+        try:
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                image.load()
+        except Exception:
+            return False
+        return True
+    probe = shutil.which("ffprobe")
+    if not probe:
+        return True
+    stream = "v:0" if kind == "clip" else "a:0"
+    result = subprocess.run(
+        [probe, "-v", "error", "-select_streams", stream, "-show_entries",
+         "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
 
-    Header sniffing is enough to catch the real cases (1-byte files, HTML error
-    responses, interrupted downloads) without probing every file on every sync.
-    """
+
+_MEDIA_VERDICTS = {}
+
+
+def usable_asset(path: "Path | None", kind: str) -> bool:
+    """A placeholder, a saved error page or a half-finished download is not an asset."""
     if path is None:
         return False
     if path.stat().st_size < MIN_MEDIA_BYTES:
@@ -185,7 +211,12 @@ def usable_asset(path: "Path | None", kind: str) -> bool:
         head = path.open("rb").read(16)
     except OSError:
         return False
-    return any(signature in head for signature in MEDIA_SIGNATURES.get(kind, []))
+    if not any(signature in head for signature in MEDIA_SIGNATURES.get(kind, [])):
+        return False
+    key = (str(path), asset_stamp(path), kind)
+    if key not in _MEDIA_VERDICTS:
+        _MEDIA_VERDICTS[key] = decodes(path, kind)
+    return _MEDIA_VERDICTS[key]
 
 
 def checked_asset(directory: Path, stem: str, suffixes: list, kind: str) -> "Path | None":
@@ -945,13 +976,21 @@ def export_problem(final_file: Path, brief: dict) -> str:
     return ""
 
 
-def newest_input_mtime(job: Job) -> float:
-    """Latest change among the things a Premiere export is built from."""
+def content_identity(path: Path) -> str:
+    """Name, size and a hash of the head — survives a copy that preserves mtime."""
+    try:
+        head = path.open("rb").read(262144)
+    except OSError:
+        return f"{path.name}:unreadable"
+    return f"{path.name}:{path.stat().st_size}:{hashlib.sha1(head).hexdigest()[:12]}"
+
+
+def export_inputs_fingerprint(job: Job) -> str:
+    """Everything a Premiere export is built from, by content rather than timestamp."""
     paths = [job.script_path, job.shot_list_path, job.brief_path, job.brand_bible_path]
     paths += matching_files(job.clips_dir, CLIP_SUFFIXES)
     paths += matching_files(job.voice_dir, AUDIO_SUFFIXES)
-    stamps = [path.stat().st_mtime for path in paths if path.exists()]
-    return max(stamps) if stamps else 0.0
+    return text_fingerprint("\n".join(sorted(content_identity(path) for path in paths if path.exists())))
 
 
 def audio_extension(fields_config: dict) -> str:
@@ -1166,7 +1205,9 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             and stages["animate"] == "done"
             and stages["voiceover"] == "done"
         )
-        stale_export = bool(final_file) and final_file.stat().st_mtime < newest_input_mtime(job)
+        stale_export = bool(final_file) and derived_is_stale(
+            job, f"final:{final_file.name}", final_file, export_inputs_fingerprint(job)
+        )
         broken_export = export_problem(final_file, brief) if (final_file and not stale_export) else ""
         if broken_export:
             print(f"[note] `final/{final_file.name}` {broken_export} ต้อง export ใหม่")
@@ -1495,19 +1536,26 @@ def cmd_list(args: argparse.Namespace) -> None:
         manifest_path = item / "manifest.json"
         if not manifest_path.exists():
             continue
-        manifest = read_json(manifest_path)
-        stages = manifest.get("stages", {})
+        try:
+            manifest = read_json(manifest_path)
+        except json.JSONDecodeError:
+            print(f"{item.name:<40} (manifest.json เสีย ให้รัน sync ใหม่)")
+            continue
+        stages = manifest.get("stages", {}) if isinstance(manifest, dict) else {}
         done = sum(1 for stage in STAGES if stages.get(stage) == "done")
         print(f"{item.name:<40} {done}/{len(STAGES)} stages  {manifest.get('client_name', '')}")
 
 
 def resolve_job(jobs_root: str, job_id: str) -> Path:
-    path = Path(job_id)
+    """A bare id resolves under --jobs first; only an explicit path is taken as one."""
+    looks_like_path = job_id != Path(job_id).name
+    if not looks_like_path:
+        candidate = Path(jobs_root) / job_id
+        if candidate.is_dir():
+            return candidate
+    path = Path(job_id).expanduser()
     if path.is_dir():
         return path
-    candidate = Path(jobs_root) / job_id
-    if candidate.is_dir():
-        return candidate
     raise SystemExit(f"ไม่พบงาน: {job_id}")
 
 

@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -270,11 +271,14 @@ def main(argv: "list | None" = None) -> None:
             print(f"[fail] {scene_id}: HTTP {error.code} {detail}")
             failed += 1
             continue
-        except urllib.error.URLError as error:
-            print(f"[fail] {scene_id}: {error.reason}")
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as error:
+            reason = getattr(error, "reason", error)
+            print(f"[fail] {scene_id}: {reason}")
             failed += 1
             continue
-        output.write_bytes(audio)
+        staging = output.with_name(output.name + ".part")
+        staging.write_bytes(audio)
+        os.replace(staging, output)
         for older in voice_dir.iterdir():
             if not older.is_file() or older == output:
                 continue
