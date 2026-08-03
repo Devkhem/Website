@@ -245,8 +245,8 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
         build_image_prompt(series)
         if wants_new_image
         else (
-            "(ใช้ภาพแม่เดิม รอบนี้เปลี่ยนแค่ hook ไม่ต้องสร้างภาพใหม่)"
-            if decision_key == "rewrite_hook"
+            "(ใช้ภาพแม่เดิมของ series นี้ ไม่ต้องสร้างภาพใหม่)"
+            if packages
             else "(ไม่ออก prompt ภาพ เพราะรอบนี้ยังไม่ทำ premise นี้ต่อ)"
         ),
         "```",
@@ -421,8 +421,10 @@ def main() -> None:
         item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
     ]
     target_episode = latest_episode_number(metrics)
-    # Posted something but no 2h number yet: the gate is still closed.
-    awaiting_metric = bool(posted) and not metrics
+    # The gate follows the newest posted episode: an older 2h row does not release it.
+    latest_posted = max(posted) if posted else 0
+    measured_at_two_hours = posted_episodes(metrics)
+    awaiting_metric = bool(posted) and latest_posted not in measured_at_two_hours
     episodes = [] if awaiting_metric else select_episodes(series, decision_key, posted, target_episode)
     unmappable = decision_key == "rewrite_hook" and not episodes
     needs_hook = decision_key == "rewrite_hook" and not unmappable and not args.hook.strip()
@@ -433,8 +435,9 @@ def main() -> None:
         episode_package(series, episode, posting_windows[index % len(posting_windows)], decision_key, args.hook.strip())
         for index, episode in enumerate(episodes)
     ]
-    # An image with no package to make would spend the daily budget for nothing.
-    wants_new_image = bool(packages) and decision_key not in {"kill", "rewrite_hook"}
+    # One mother image serves the whole series: only a premise with nothing posted yet
+    # needs a new one. An image with no package to make would be wasted outright.
+    wants_new_image = bool(packages) and decision_key not in {"kill", "rewrite_hook"} and not posted
 
     output_dir = Path(args.out) / args.date
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -457,8 +460,8 @@ def main() -> None:
 
     if wants_new_image:
         print(f"Created {image_prompt_path}")
-    elif decision_key == "rewrite_hook":
-        print("ใช้ภาพแม่เดิม ไม่ออก prompt ภาพใหม่ เพราะรอบนี้เปลี่ยนแค่ hook")
+    elif packages:
+        print("ใช้ภาพแม่เดิม ไม่ออก prompt ภาพใหม่")
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
     print(f"Decision: {decision}")

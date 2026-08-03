@@ -75,7 +75,14 @@ def read_json(path: Path) -> dict:
 
 
 def write_json(path: Path, payload: dict) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    """Write through a sibling and swap it in, so a killed sync cannot truncate state.
+
+    A half-written asset-log parses as broken, and a broken log silently adopts every
+    stale asset as current.
+    """
+    staging = path.with_name(path.name + ".part")
+    staging.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(staging, path)
 
 
 def write_text(path: Path, text: str) -> None:
