@@ -74,17 +74,14 @@ def voice_fingerprint(voice_id: str, settings: dict) -> str:
     return text_fingerprint("|".join(parts))
 
 
-def write_voice_settings(voice_dir: Path, voice_id: str, settings: dict) -> None:
-    """Remember the voice this job was rendered with, so `sync` agrees with it.
+def write_voice_override(voice_dir: Path, voice_id: str) -> None:
+    """Remember only an explicit `--voice-id`, so `sync` stops undoing it.
 
-    Without this, `--voice-id` would be undone by the next sync, which only knows
-    the global .env value.
+    Model, stability and format stay in the shared config on purpose: changing them
+    there must still retire the takes rendered with the old values.
     """
-    payload = {"voice_id": voice_id}
-    payload.update({key: settings.get(key) for key in
-                    ("model_id", "stability", "similarity_boost", "style", "output_format")})
     (voice_dir / "settings.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        json.dumps({"voice_id": voice_id}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
 
@@ -280,8 +277,8 @@ def main(argv: "list | None" = None) -> None:
         write_render_log(voice_dir, render_log)
         print(f"[ok] {scene_id} -> {output.name} ({len(audio)} bytes)")
 
-    if failed < len(pending):
-        write_voice_settings(voice_dir, voice_id, settings)
+    if failed < len(pending) and args.voice_id:
+        write_voice_override(voice_dir, voice_id)
 
     print()
     print(f"สำเร็จ {len(pending) - failed}/{len(pending)} ซีน")

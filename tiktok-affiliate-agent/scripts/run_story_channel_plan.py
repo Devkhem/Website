@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--account", default=str(ROOT / "data" / "tiktok_account.json"), help="TikTok account JSON.")
     parser.add_argument("--metrics", default=str(ROOT / "data" / "story_metrics.csv"), help="Story metrics CSV.")
     parser.add_argument("--out", default=str(ROOT / "outputs"), help="Output directory.")
+    parser.add_argument("--hook", default="", help="hook ใหม่สำหรับรอบที่ retention สั่งให้เปลี่ยน hook.")
     return parser.parse_args()
 
 
@@ -128,9 +129,9 @@ def select_episodes(series: dict, decision_key: str, posted: set) -> list:
     if decision_key == "kill":
         return []
     if decision_key == "rewrite_hook":
-        # Same episodes, new hooks. Re-package what was posted, or the first three.
+        # One variation of the episode that underperformed, with a genuinely new hook.
         redo = [item for item in episodes if int(item.get("episode", 0)) in posted]
-        return (redo or episodes)[:3]
+        return (redo or episodes)[:1]
     fresh = [item for item in episodes if int(item.get("episode", 0)) not in posted]
     if not fresh:
         # Everything configured has been posted; repeating it would queue old content.
@@ -162,15 +163,11 @@ def build_image_prompt(series: dict) -> str:
     )
 
 
-REWRITE_MARK = "[ต้องเขียน hook ใหม่ ห้ามใช้ของเดิม]"
-
-
-def episode_package(series: dict, episode: dict, posting_time: str, decision_key: str = "no_data") -> dict:
+def episode_package(series: dict, episode: dict, posting_time: str, decision_key: str = "no_data", new_hook: str = "") -> dict:
     title = episode.get("title", "")
     hook = episode.get("hook", "")
-    if decision_key == "rewrite_hook":
-        # The old hook underperformed, so nothing downstream may reuse it as-is.
-        hook = f"{REWRITE_MARK} เดิมคือ: {hook}"
+    if decision_key == "rewrite_hook" and new_hook:
+        hook = new_hook
     twist = episode.get("twist", "")
     series_title = series.get("title", "")
     caption = f"{hook} ฟังให้จบแล้วบอกทีว่าคุณจะเปิดไหม"
@@ -221,7 +218,7 @@ def retention_rule_lines(config: dict) -> list:
     ]
 
 
-def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False) -> str:
+def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False) -> str:
     handle = account.get("handle", "@thatslife6969")
     lines = [
         f"# Story Channel Plan: {plan_date}",
@@ -244,11 +241,15 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
     lines.extend(retention_rule_lines(config))
     lines.append("")
     if not packages:
-        reason = (
-            "retention ต่ำกว่าเกณฑ์ kill จึงไม่ออก episode package ให้รอบนี้"
-            if decision_exhausted is False
-            else "ตอนทั้งหมดใน series นี้ถูกโพสต์ไปหมดแล้ว ต้องเขียน episode ใหม่ก่อน"
-        )
+        if needs_hook:
+            reason = (
+                "retention บอกให้เปลี่ยน hook แต่ยังไม่ได้ระบุ hook ใหม่\n"
+                "เขียน hook ใหม่แล้วรันซ้ำ เช่น --hook \"ประโยคเปิดใหม่ 3 วินาทีแรก\""
+            )
+        elif decision_exhausted:
+            reason = "ตอนทั้งหมดใน series นี้ถูกโพสต์ไปหมดแล้ว ต้องเขียน episode ใหม่ก่อน"
+        else:
+            reason = "retention ต่ำกว่าเกณฑ์ kill จึงไม่ออก episode package ให้รอบนี้"
         lines.extend(
             [
                 "## ยังไม่ออก package รอบนี้",
@@ -380,8 +381,12 @@ def main() -> None:
         item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
     ]
     episodes = select_episodes(series, decision_key, posted)
+    needs_hook = decision_key == "rewrite_hook" and not args.hook.strip()
+    if needs_hook:
+        # Emitting the old hook again would repeat the test we just failed.
+        episodes = []
     packages = [
-        episode_package(series, episode, posting_windows[index % len(posting_windows)], decision_key)
+        episode_package(series, episode, posting_windows[index % len(posting_windows)], decision_key, args.hook.strip())
         for index, episode in enumerate(episodes)
     ]
 
@@ -394,7 +399,7 @@ def main() -> None:
         # Following it would spend the next image on the premise we just stopped.
         image_prompt_path.unlink()
     (output_dir / "story-channel-plan.md").write_text(
-        render_markdown(account, config, series, packages, decision, args.date, exhausted), encoding="utf-8"
+        render_markdown(account, config, series, packages, decision, args.date, exhausted, needs_hook), encoding="utf-8"
     )
     write_queue(output_dir / "story_posting_queue.csv", packages)
     write_episode_packages(output_dir, packages)
@@ -404,7 +409,9 @@ def main() -> None:
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
     print(f"Decision: {decision}")
-    if not packages and exhausted:
+    if needs_hook:
+        print("ไม่ได้สร้าง episode package เพราะยังไม่ได้ระบุ hook ใหม่ ให้รันซ้ำพร้อม --hook")
+    elif not packages and exhausted:
         print("ไม่ได้สร้าง episode package เพราะตอนทั้งหมดใน series นี้ถูกโพสต์ไปหมดแล้ว")
     elif not packages:
         print("ไม่ได้สร้าง episode package เพราะ retention ต่ำกว่าเกณฑ์ kill")

@@ -250,9 +250,10 @@ def voice_fingerprint(fields_config: dict, voice_dir: "Path | None" = None) -> s
                 saved = read_json(chosen)
             except json.JSONDecodeError:
                 saved = {}
+            # Only the voice override is per-job; model/stability/format stay live,
+            # so changing them in the config still retires the old takes.
             if isinstance(saved, dict) and saved.get("voice_id"):
                 voice_id = str(saved["voice_id"]).strip()
-                settings.update({key: value for key, value in saved.items() if key != "voice_id" and value is not None})
     parts = [
         f"voice={voice_id}",
         f"model={settings.get('model_id', 'eleven_multilingual_v2')}",
@@ -366,6 +367,10 @@ def map_response(row: dict, keywords: dict) -> dict:
 def parse_duration(value, default: int) -> int:
     """Read a free-form duration answer without gluing separate numbers together."""
     text = str(value or "").strip()
+    clock = re.fullmatch(r"\s*(\d+)\s*:\s*([0-5]?\d)\s*", text)
+    if clock:
+        seconds = int(clock.group(1)) * 60 + int(clock.group(2))
+        return seconds if 3 <= seconds <= 900 else default
     numbers = [float(found) for found in re.findall(r"\d+(?:\.\d+)?", text)]
     if not numbers:
         return default
@@ -859,6 +864,13 @@ def export_problem(final_file: Path, brief: dict) -> str:
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         return f"อ่านไฟล์ไม่ได้: {result.stderr.strip().splitlines()[-1] if result.stderr.strip() else 'ffprobe ล้มเหลว'}"
+    audio = subprocess.run(
+        [probe, "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(final_file)],
+        capture_output=True, text=True,
+    )
+    if audio.returncode != 0 or not audio.stdout.strip():
+        return "ไฟล์ไม่มีเสียง ต้อง export พร้อม voice-over และเพลงประกอบ"
     values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if len(values) < 4:
         return "ไม่พบวิดีโอสตรีมในไฟล์"
@@ -1009,6 +1021,12 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     if shots and stages["shot_list"] == "done":
         image_dir = job.path / "04-image-prompts"
         flow_dir = job.path / "05-flow-prompts"
+        current_ids = {str(shot.get("id") or "").strip() or "sh-xx" for shot in shots}
+        for folder in (image_dir, flow_dir):
+            for stale_prompt in folder.glob("*.txt"):
+                if stale_prompt.stem not in current_ids:
+                    stale_prompt.unlink()
+                    print(f"[note] ลบ `{folder.name}/{stale_prompt.name}` เพราะช็อตนี้ไม่มีใน shot list แล้ว")
         image_prompts = {}
         flow_prompts = {}
         for shot in shots:
