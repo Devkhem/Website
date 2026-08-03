@@ -169,7 +169,9 @@ def main(argv: "list | None" = None) -> None:
             continue
         existing = find_existing_audio(voice_dir, scene_id) or find_existing_audio(voice_dir, output.stem)
         record = render_log.get(scene_id) if isinstance(render_log.get(scene_id), dict) else {}
-        stale = bool(record.get("text_sha")) and record["text_sha"] != text_fingerprint(text)
+        # A manual take that replaced our file is not ours to call stale.
+        record_matches = not record.get("file") or (existing is not None and record["file"] == existing.name)
+        stale = bool(record.get("text_sha")) and record_matches and record["text_sha"] != text_fingerprint(text)
         if existing and stale:
             print(f"[stale] {scene_id} เสียงเดิมอัดจากสคริปต์คนละเวอร์ชัน จะอัดใหม่")
         elif existing and not args.overwrite:
@@ -215,6 +217,15 @@ def main(argv: "list | None" = None) -> None:
             failed += 1
             continue
         output.write_bytes(audio)
+        for older in voice_dir.iterdir():
+            if not older.is_file() or older == output:
+                continue
+            if older.stem != output.stem or older.suffix.lower() not in AUDIO_SUFFIXES:
+                continue
+            parked = voice_dir / "superseded"
+            parked.mkdir(exist_ok=True)
+            older.rename(parked / older.name)
+            print(f"[move] {older.name} -> superseded/ (ถูกแทนที่ด้วย {output.name})")
         # Recording the text lets `sync` spot audio left over from an edited script.
         render_log[scene_id] = {"text_sha": text_fingerprint(text), "file": output.name}
         write_render_log(voice_dir, render_log)

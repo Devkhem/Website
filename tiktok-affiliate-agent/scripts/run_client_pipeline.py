@@ -59,6 +59,7 @@ AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
 # ElevenLabs output_format prefix -> the extension its bytes actually deserve.
 AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 FINAL_SUFFIXES = [".mp4", ".mov"]
+ASSET_LOG_VERSION = 2
 
 
 # ---------------------------------------------------------------- utilities
@@ -651,8 +652,9 @@ def shot_image_fingerprint(shot: dict) -> str:
     return text_fingerprint("|".join(str(part or "") for part in parts))
 
 
-def shot_motion_fingerprint(shot: dict) -> str:
-    parts = [shot.get("motion_prompt"), shot.get("camera_move"), shot.get("duration_sec")]
+def shot_motion_fingerprint(shot: dict, still_stamp: str = "") -> str:
+    """A clip is only current while both its motion brief and its source still are."""
+    parts = [shot.get("motion_prompt"), shot.get("camera_move"), shot.get("duration_sec"), still_stamp]
     return text_fingerprint("|".join(str(part or "") for part in parts))
 
 
@@ -675,9 +677,11 @@ def track_shot_assets(job: Job, shots: list) -> dict:
     for shot in shots:
         shot_id = str(shot.get("id") or "")
         record = log.get(shot_id) if isinstance(log.get(shot_id), dict) else {}
+        still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
+        still_stamp = f"{still.name}:{int(still.stat().st_mtime)}" if still else ""
         for kind, directory, suffixes, fingerprint in (
             ("still", job.stills_dir, IMAGE_SUFFIXES, shot_image_fingerprint(shot)),
-            ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot)),
+            ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot, still_stamp)),
         ):
             asset = find_asset(directory, shot_id, suffixes)
             if not asset:
@@ -686,8 +690,10 @@ def track_shot_assets(job: Job, shots: list) -> dict:
                 continue
             stamp = f"{asset.name}:{int(asset.stat().st_mtime)}"
             entry = record.get(kind) if isinstance(record.get(kind), dict) else {}
-            if entry.get("asset") != stamp:
-                record[kind] = {"asset": stamp, "sha": fingerprint}
+            if entry.get("asset") != stamp or entry.get("v") != ASSET_LOG_VERSION:
+                # New asset, or a record written before the current fingerprint scheme:
+                # adopt what is on disk instead of raising a false alarm.
+                record[kind] = {"asset": stamp, "sha": fingerprint, "v": ASSET_LOG_VERSION}
             elif entry.get("sha") != fingerprint:
                 result["stale_" + kind + "s"].append(shot_id)
         log[shot_id] = record
@@ -768,8 +774,12 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     shot_list = job.load_stage_json(job.shot_list_path, "shots")
     shots = shot_list.get("shots", []) if shot_list else []
     problems = shot_list_problems(script, shots)
-    if shots and not problems:
+    if shots and script and not problems:
         stages["shot_list"] = "done"
+    elif shots and not script:
+        # Scene references cannot be checked yet, so do not send anyone into paid image work.
+        stages["shot_list"] = "waiting"
+        actions.append("`script.json` ยังใช้ไม่ได้ ต้องแก้ให้ผ่านก่อนถึงจะเริ่มทำภาพตาม `shot-list.json`")
     elif shots:
         stages["shot_list"] = "ready"
         for problem in problems:
@@ -781,7 +791,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         stages["shot_list"] = "blocked"
 
     # --- stills + animate prompts ---
-    if shots:
+    if shots and script:
         image_dir = job.path / "04-image-prompts"
         flow_dir = job.path / "05-flow-prompts"
         for shot in shots:
@@ -839,7 +849,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
 
     # --- edit ---
     if shots and scenes:
-        write_assembly_sheet(job, script, shots)
+        write_assembly_sheet(job, brief, script, shots)
         write_text(job.path / "06-edit-notes.md", edit_notes(brief, script, shots))
         final_file = latest_file(job.final_dir, FINAL_SUFFIXES)
         exports = matching_files(job.final_dir, FINAL_SUFFIXES)
@@ -925,7 +935,7 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
             )
 
 
-def write_assembly_sheet(job: Job, script: dict, shots: list) -> None:
+def write_assembly_sheet(job: Job, brief: dict, script: dict, shots: list) -> None:
     scenes = {str(scene.get("id")): scene for scene in script.get("scenes", [])}
     path = job.path / "06-assembly-sheet.csv"
     fields = [
@@ -967,7 +977,9 @@ def write_assembly_sheet(job: Job, script: dict, shots: list) -> None:
                     "clip_file": f"clips/{clip.name}" if clip else "MISSING",
                     # A cleared `vo` wins over any audio left behind by an earlier take.
                     "voice_file": "no-vo" if silent else (f"voiceover/{voice.name}" if voice else "MISSING"),
-                    "on_screen_text": str(scene.get("on_screen_text") or "").replace("\n", " "),
+                    "on_screen_text": (
+                        str(scene.get("on_screen_text") or "").replace("\n", " ") if wants_subtitles(brief) else ""
+                    ),
                     "camera_move": shot.get("camera_move", ""),
                 }
             )
