@@ -429,7 +429,7 @@ def script_prompt(brief: dict, brand_bible: str) -> str:
             f"แบ่งเป็น {scene_count} ซีน รวมเวลาต้องไม่เกิน {duration} วินาที",
             "ซีนแรกคือ hook ที่ทำให้หยุดนิ้วใน 3 วินาที ซีนสุดท้ายคือ CTA",
             "voiceover ต้องเป็นภาษาพูด อ่านออกเสียงแล้วลื่น ไม่มีอิโมจิ ไม่มีวงเล็บกำกับ",
-            "on_screen_text ห้ามเกิน 2 บรรทัด",
+            "on_screen_text ห้ามเกิน 2 บรรทัด" if wants_subtitles(brief) else "ห้ามใส่ตัวหนังสือบนจอเลย ให้ on_screen_text เป็นค่าว่างทุกซีน",
             "",
             "ตอบเป็น JSON ล้วน ไม่ต้องมีคำอธิบายอื่น ตาม schema นี้",
             "{",
@@ -495,6 +495,11 @@ def shot_list_prompt(brief: dict, script: dict, rules: dict, brand_bible: str) -
     )
 
 
+def wants_subtitles(brief: dict) -> bool:
+    """`subtitles=none` in the brief means no burned-in text anywhere in the video."""
+    return str(brief.get("subtitles", "auto")).strip().lower() not in {"none", "no", "off", "ไม่ใส่", "ไม่มี"}
+
+
 def orientation_hint(aspect_ratio: str) -> str:
     parts = re.split(r"[:xX/]", str(aspect_ratio or "").strip())
     try:
@@ -526,7 +531,8 @@ def compose_image_prompt(shot: dict, brief: dict, rules: dict) -> str:
             "",
             "PROMPT",
             base,
-            f"{orientation_hint(brief.get('aspect_ratio', '9:16'))} {brief.get('aspect_ratio', '9:16')}, photographic, natural light, leave clean space for subtitles",
+            f"{orientation_hint(brief.get('aspect_ratio', '9:16'))} {brief.get('aspect_ratio', '9:16')}, photographic, natural light"
+            + (", leave clean space for subtitles" if wants_subtitles(brief) else ", the frame must read on its own without any caption"),
             "",
             "NEGATIVE",
             negative,
@@ -956,7 +962,9 @@ def edit_notes(brief: dict, script: dict, shots: list) -> str:
             "2. เรียงคลิปตามคอลัมน์ `order` ใน `06-assembly-sheet.csv`",
             "3. วาง voice-over ของแต่ละซีนให้ตรงกับช็อตแรกของซีนนั้น",
             "4. ตัดความยาวคลิปให้ตรงกับ `duration_sec`",
-            "5. ใส่ subtitle จากคอลัมน์ `on_screen_text` ไม่เกิน 2 บรรทัด",
+            "5. ใส่ subtitle จากคอลัมน์ `on_screen_text` ไม่เกิน 2 บรรทัด"
+            if wants_subtitles(brief)
+            else "5. ไม่ใส่ subtitle และไม่ใส่ตัวหนังสือใด ๆ บนภาพ ตามที่ตกลงกับลูกค้า",
             "6. ใส่เพลงประกอบระดับ -18 dB และ duck ตอนมีเสียงพูด",
             f"7. export ลงโฟลเดอร์ `final/` ชื่อ `{slugify(str(brief.get('client_name', 'client')))}-v1.mp4`",
             "",

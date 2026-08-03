@@ -67,6 +67,15 @@ python3 scripts/run_client_pipeline.py new --responses ~/Downloads/form.csv --jo
 `--force` จะย้ายของเดิมทั้งหมด (brand bible, script, ภาพ, คลิป, เสียง, ไฟล์ final) เข้า `archive-<เวลา>/`
 แล้วเริ่มนับหนึ่งใหม่จาก brief ใหม่ ไม่ให้ review packet ของ brief ใหม่ไปหยิบไฟล์ final ของรอบเก่ามาใช้
 
+ถ้างานไหนไม่เอาตัวหนังสือบนจอเลย ให้ตั้ง `subtitles=none`
+
+```bash
+python3 scripts/run_client_pipeline.py new --responses ~/Downloads/form.csv --field subtitles=none
+```
+
+prompt ของสคริปต์จะสั่งไม่ให้มี on_screen_text, prompt ภาพจะไม่เว้นที่ว่างสำหรับ subtitle
+และ edit notes จะสั่งไม่ให้ใส่ตัวหนังสือใด ๆ ตอนตัดต่อ
+
 ถ้าคำถามในฟอร์มถูกเปลี่ยน ให้เพิ่มคำค้นใน `data/client_intake_fields.json` ที่ `field_keywords`
 สคริปต์จับคู่จากคำที่อยู่ในหัวคอลัมน์ ไม่ต้องตั้งชื่อคอลัมน์ตรงเป๊ะ
 คำตอบที่ยัง map ไม่เข้าฟิลด์ไหนจะถูกเก็บไว้ใน `form_extra` ไม่หายไป
