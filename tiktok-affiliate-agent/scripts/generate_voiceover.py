@@ -330,6 +330,7 @@ def main(argv: "list | None" = None) -> None:
         raise SystemExit("ยังไม่ได้ตั้ง ELEVENLABS_VOICE_ID ใน .env หรือส่ง --voice-id")
 
     failed = 0
+    override_saved = False
     for scene_id, text, output in pending:
         try:
             audio = synthesize(text, voice_id, api_key, settings, args.timeout)
@@ -345,6 +346,11 @@ def main(argv: "list | None" = None) -> None:
             continue
         staging = output.with_name(output.name + ".part")
         staging.write_bytes(audio)
+        if not looks_like_audio(staging, settings):
+            staging.unlink(missing_ok=True)
+            print(f"[fail] {scene_id}: ไฟล์ที่ได้กลับมาไม่ใช่เสียงที่ใช้ได้ ไม่ทับของเดิม")
+            failed += 1
+            continue
         os.replace(staging, output)
         for older in voice_dir.iterdir():
             if not older.is_file() or older == output:
@@ -363,10 +369,12 @@ def main(argv: "list | None" = None) -> None:
             "stamp": content_identity(output),
         }
         write_render_log(voice_dir, render_log)
+        if args.voice_id.strip() and not override_saved:
+            # Save it now: an interrupted batch must not leave paid takes pointing at
+            # a voice the next sync does not know about.
+            write_voice_override(voice_dir, voice_id)
+            override_saved = True
         print(f"[ok] {scene_id} -> {output.name} ({len(audio)} bytes)")
-
-    if failed < len(pending) and args.voice_id.strip():
-        write_voice_override(voice_dir, voice_id)
 
     print()
     print(f"สำเร็จ {len(pending) - failed}/{len(pending)} ซีน")

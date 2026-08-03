@@ -311,12 +311,14 @@ def find_asset(directory: Path, stem: str, suffixes: list) -> "Path | None":
     if not entries:
         return None
     if len(entries) > 1:
+        # File times cannot order revisions once files are copied between machines.
         warn_once(
             f"duplicate:{directory}:{stem}",
-            f"[warn] {directory.name}/{stem} มีหลายไฟล์: {', '.join(item.name for item in entries)} ใช้ไฟล์ล่าสุด",
+            f"[warn] {directory.name}/{stem} มีหลายไฟล์: {', '.join(sorted(item.name for item in entries))} "
+            f"ให้เหลือไฟล์เดียว ระบบจะไม่เดาว่าอันไหนใหม่กว่า",
         )
-    # Newest wins: a replacement saved under another extension must not lose to the old one.
-    return max(entries, key=lambda item: (item.stat().st_mtime_ns, wanted.index(item.suffix.lower())))
+        return None
+    return entries[0]
 
 
 def matching_files(directory: Path, suffixes: list) -> list:
@@ -520,12 +522,37 @@ def parse_duration(value, default: int) -> int:
     return seconds
 
 
+RATIO_LABELS = {
+    "9:16": ["แนวตั้ง", "vertical", "portrait", "tiktok", "reels", "shorts"],
+    "16:9": ["แนวนอน", "horizontal", "landscape", "youtube"],
+    "1:1": ["จัตุรัส", "สี่เหลี่ยม", "square"],
+    "4:5": ["4x5", "feed"],
+}
+
+
+def normalize_ratio(value, default: str) -> str:
+    """Turn `แนวตั้ง` or `9:16 (แนวตั้ง)` into `9:16` while the brief is still cheap to fix."""
+    text = str(value or "").strip()
+    found = parse_ratio(text)
+    if found:
+        width, height = found
+        return f"{width:g}:{height:g}"
+    lowered = text.lower()
+    for ratio, labels in RATIO_LABELS.items():
+        if any(label in lowered for label in labels):
+            return ratio
+    if text:
+        print(f"[warn] อ่านสัดส่วนภาพ {text!r} ไม่ออก ใช้ {default} ไปก่อน ถ้าไม่ใช่ให้ใส่ --field aspect_ratio=9:16")
+    return default
+
+
 def build_brief(mapped: dict, defaults: dict, overrides: dict) -> dict:
     brief = dict(defaults)
     brief.update(mapped)
     brief.update(overrides)
     brief["duration_sec"] = parse_duration(brief.get("duration_sec"), int(defaults.get("duration_sec", 45)))
     brief["scene_count"] = int(brief.get("scene_count") or defaults.get("scene_count", 6))
+    brief["aspect_ratio"] = normalize_ratio(brief.get("aspect_ratio"), str(defaults.get("aspect_ratio", "9:16")))
     brief.setdefault("client_name", "ลูกค้าไม่ระบุชื่อ")
     brief["received_at"] = brief.get("received_at") or datetime.now().isoformat(timespec="seconds")
     return brief
@@ -916,14 +943,20 @@ def read_source_log(job: Job) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str) -> bool:
+def content_digest(path: Path) -> str:
+    """Content identity without the filename, so a rename is not a new artifact."""
+    identity = content_identity(path)
+    return identity.split(":", 1)[1] if ":" in identity else identity
+
+
+def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str, stamp: str = "") -> bool:
     """True when the sources changed after `derived` was last written.
 
     Rewriting the derived file adopts whatever the sources say at that moment, so a
     fresh paste always clears the flag.
     """
     log = read_source_log(job)
-    stamp = asset_stamp(derived if derived.exists() else None)
+    stamp = stamp or asset_stamp(derived if derived.exists() else None)
     entry = log.get(key) if isinstance(log.get(key), dict) else {}
     if entry.get("stamp") != stamp:
         # The derived file was just rewritten, so it matches its sources by definition.
@@ -1339,7 +1372,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             and stages["voiceover"] == "done"
         )
         stale_export = bool(final_file) and derived_is_stale(
-            job, f"final:{final_file.name}", final_file, export_inputs_fingerprint(job)
+            job, "final", final_file, export_inputs_fingerprint(job), content_digest(final_file)
         )
         broken_export = export_problem(final_file, brief) if (final_file and not stale_export) else ""
         if broken_export:
