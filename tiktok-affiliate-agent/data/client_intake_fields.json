@@ -1,0 +1,51 @@
+{
+  "source": "Google Form -> Google Sheet -> File > Download > CSV หรือ File > Share > Publish to web > CSV",
+  "field_keywords": {
+    "client_name": ["ชื่อลูกค้า", "ชื่อแบรนด์", "ชื่อบริษัท", "ชื่อร้าน", "brand", "client", "company"],
+    "contact": ["อีเมล", "email", "เบอร์", "โทร", "line", "ติดต่อ", "contact"],
+    "product": ["สินค้า", "บริการ", "product", "service", "สิ่งที่ขาย"],
+    "goal": ["เป้าหมาย", "goal", "objective", "อยากได้", "โจทย์"],
+    "audience": ["กลุ่มเป้าหมาย", "กลุ่มลูกค้า", "audience", "target"],
+    "tone": ["โทน", "อารมณ์", "สไตล์", "tone", "mood", "style"],
+    "duration_sec": ["ความยาว", "duration", "วินาที", "length"],
+    "aspect_ratio": ["อัตราส่วน", "สัดส่วน", "aspect", "ratio", "แนวตั้ง", "แนวนอน"],
+    "platform": ["แพลตฟอร์ม", "platform", "ช่องทาง", "ลงที่ไหน", "tiktok", "reels"],
+    "reference": ["ตัวอย่าง", "reference", "อ้างอิง", "คลิปที่ชอบ"],
+    "must_include": ["ต้องมี", "ต้องพูด", "key message", "must", "จุดขาย"],
+    "avoid": ["ห้าม", "ไม่เอา", "หลีกเลี่ยง", "avoid", "ข้อห้าม"],
+    "deadline": ["deadline", "กำหนดส่ง", "วันที่ต้องการ", "ส่งงาน"],
+    "assets_link": ["ไฟล์", "โลโก้", "drive", "asset", "แนบ", "ภาพสินค้า"],
+    "budget": ["งบ", "budget", "ราคา", "แพ็กเกจ", "package"],
+    "notes": ["เพิ่มเติม", "อื่น ๆ", "note", "comment", "รายละเอียด"]
+  },
+  "defaults": {
+    "language": "th",
+    "duration_sec": 45,
+    "aspect_ratio": "9:16",
+    "platform": "TikTok",
+    "scene_count": 6,
+    "revision_rounds": 2,
+    "tone": "เป็นกันเอง จริงใจ ไม่ขายแข็ง"
+  },
+  "visual_rules": {
+    "prefer": [
+      "ภาพถ่ายจริง แสงธรรมชาติ",
+      "ระยะภาพชัดเจน อ่านเรื่องได้ใน 1 วินาที",
+      "เว้น negative space บนหรือล่างสำหรับ subtitle"
+    ],
+    "avoid": [
+      "ตัวหนังสือในภาพ",
+      "watermark หรือ logo แปลกปลอม",
+      "มือหรือนิ้วผิดรูป",
+      "หน้าคนที่ดูเป็น AI จัด",
+      "เคลมผลลัพธ์เกินจริง"
+    ]
+  },
+  "elevenlabs": {
+    "model_id": "eleven_multilingual_v2",
+    "stability": 0.45,
+    "similarity_boost": 0.75,
+    "style": 0.0,
+    "output_format": "mp3_44100_128"
+  }
+}
