@@ -126,11 +126,23 @@ def write_render_log(voice_dir: Path, log: dict) -> None:
     write_json_atomic(voice_dir / "rendered.json", log)
 
 
-def asset_stamp(asset: "Path | None") -> str:
+def content_identity(asset: "Path | None") -> str:
+    """Identity by bytes, so a manual take that reuses the filename is recognised."""
     if asset is None:
         return ""
-    info = asset.stat()
-    return f"{asset.name}:{info.st_mtime_ns}:{info.st_size}"
+    window = 262144
+    try:
+        size = asset.stat().st_size
+        with asset.open("rb") as handle:
+            head = handle.read(window)
+            if size > window:
+                handle.seek(max(size - window, window))
+                tail = handle.read(window)
+            else:
+                tail = b""
+    except OSError:
+        return f"{asset.name}:unreadable"
+    return f"{asset.name}:{size}:{hashlib.sha1(head + tail).hexdigest()[:16]}"
 
 
 AUDIO_SIGNATURES = [b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xe3", b"RIFF", b"ftyp", b"OggS"]
@@ -280,7 +292,7 @@ def main(argv: "list | None" = None) -> None:
         # A manual take is not ours to call stale, even when it kept our filename.
         record_matches = not record.get("file") or (existing is not None and record["file"] == existing.name)
         if record_matches and record.get("stamp") and existing is not None:
-            record_matches = record["stamp"] == asset_stamp(existing)
+            record_matches = record["stamp"] == content_identity(existing)
         voice_sha = voice_fingerprint(voice_id, settings)
         text_changed = bool(record.get("text_sha")) and record["text_sha"] != text_fingerprint(text)
         voice_changed = bool(record.get("voice_sha")) and record["voice_sha"] != voice_sha
@@ -348,7 +360,7 @@ def main(argv: "list | None" = None) -> None:
             "text_sha": text_fingerprint(text),
             "voice_sha": voice_fingerprint(voice_id, settings),
             "file": output.name,
-            "stamp": asset_stamp(output),
+            "stamp": content_identity(output),
         }
         write_render_log(voice_dir, render_log)
         print(f"[ok] {scene_id} -> {output.name} ({len(audio)} bytes)")
@@ -358,7 +370,8 @@ def main(argv: "list | None" = None) -> None:
 
     print()
     print(f"สำเร็จ {len(pending) - failed}/{len(pending)} ซีน")
-    print(f'รัน `python3 scripts/run_client_pipeline.py sync "{job_path}"` เพื่ออัปเดตสถานะ')
+    fields_flag = f' --fields "{args.fields}"' if Path(args.fields) != DEFAULT_FIELDS else ""
+    print(f'รัน `python3 scripts/run_client_pipeline.py{fields_flag} sync "{job_path}"` เพื่ออัปเดตสถานะ')
     if failed:
         # Exit nonzero so a shell pipeline does not treat a failed batch as done.
         raise SystemExit(1)

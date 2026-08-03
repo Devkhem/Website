@@ -227,19 +227,25 @@ def media_duration(path: Path) -> float:
     return _DURATIONS[key]
 
 
-def voice_overruns_scene(scene: dict, asset: "Path | None", raw_bps: int = 0) -> float:
-    """How many seconds the take is longer than the scene it has to sit in."""
+def voice_duration_problem(scene: dict, asset: "Path | None", raw_bps: int = 0) -> str:
+    """Empty when the take fits its scene; otherwise how it fails to."""
     planned = as_float(scene.get("duration_sec"), 0)
     if asset is None or planned <= 0:
-        return 0.0
+        return ""
     if asset.suffix.lower() in RAW_AUDIO_SUFFIXES:
         spoken = asset.stat().st_size / raw_bps if raw_bps > 0 else 0.0
     else:
         spoken = media_duration(asset)
     if spoken <= 0:
-        return 0.0
-    tolerance = max(1.0, planned * 0.2)
-    return spoken - planned if spoken - planned > tolerance else 0.0
+        return ""
+    if spoken - planned > max(1.0, planned * 0.2):
+        return f"ยาวเกินซีนอยู่ {spoken - planned:.1f} วินาที"
+    # A scene can end on silence, but a take covering almost none of it means the
+    # narration or the scene length is wrong.
+    floor = max(1.0, planned * 0.4)
+    if spoken < floor:
+        return f"ยาวแค่ {spoken:.1f} วินาที จากซีน {planned:g} วินาที เสียงหายไปเกือบทั้งซีน"
+    return ""
 
 
 def raw_bytes_per_second(fields_config: dict) -> int:
@@ -324,14 +330,6 @@ def matching_files(directory: Path, suffixes: list) -> list:
     ]
 
 
-def latest_file(directory: Path, suffixes: list) -> "Path | None":
-    """Newest export wins, so a v2 re-cut is picked up instead of the older v1."""
-    candidates = matching_files(directory, suffixes)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: (item.stat().st_mtime, item.name))
-
-
 def as_float(value, default=0.0):
     try:
         return float(value)
@@ -407,7 +405,7 @@ def voice_is_stale(scene: dict, log: dict, asset: "Path | None", voice_sha: str 
         return False
     if asset is not None and record.get("file") and record["file"] != asset.name:
         return False
-    if asset is not None and record.get("stamp") and record["stamp"] != asset_stamp(asset):
+    if asset is not None and record.get("stamp") and record["stamp"] != content_identity(asset):
         # Same name, different bytes: someone dropped their own take in.
         return False
     if voice_sha and record.get("voice_sha") and record["voice_sha"] != voice_sha:
@@ -1282,22 +1280,22 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             str(s.get("id", "")): checked_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES, "audio", raw_bps)
             for s in voiced
         }
-        overrunning = [
-            (s, voice_overruns_scene(s, voice_assets[str(s.get("id", ""))], raw_bps))
+        mismatched = [
+            (s, voice_duration_problem(s, voice_assets[str(s.get("id", ""))], raw_bps))
             for s in voiced
         ]
-        overrunning = [(s, extra) for s, extra in overrunning if extra > 0]
+        mismatched = [(s, problem) for s, problem in mismatched if problem]
         stale_vo = [s for s in voiced if voice_assets[str(s.get("id", ""))] and voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))], voice_sha)]
         missing_vo = [
             s
             for s in voiced
             if not voice_assets[str(s.get("id", ""))] or voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))], voice_sha)
         ]
-        stages["voiceover"] = "done" if not (missing_vo or overrunning) else "ready"
-        for scene, extra in overrunning:
+        stages["voiceover"] = "done" if not (missing_vo or mismatched) else "ready"
+        for scene, problem in mismatched:
             actions.append(
-                f"เสียงของ {scene.get('id')} ยาวเกินซีนอยู่ {extra:.1f} วินาที "
-                f"ให้ตัดบทให้สั้นลงหรือขยาย duration_sec ของซีน"
+                f"เสียงของ {scene.get('id')} {problem} "
+                f"ให้แก้บทหรือปรับ duration_sec ของซีนให้ตรงกัน"
             )
         if stale_vo:
             print(f"[note] {len(stale_vo)} ซีนมีเสียงเก่าที่อัดจากสคริปต์คนละเวอร์ชัน ต้องอัดใหม่: {', '.join(str(s.get('id')) for s in stale_vo)}")
@@ -1314,10 +1312,25 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     if shots and scenes:
         write_assembly_sheet(job, brief, script, shots, raw_bytes_per_second(fields_config))
         write_text(job.path / "06-edit-notes.md", edit_notes(brief, script, shots))
-        final_file = latest_file(job.final_dir, FINAL_SUFFIXES)
         exports = matching_files(job.final_dir, FINAL_SUFFIXES)
-        if final_file and len(exports) > 1:
-            print(f"[note] มีไฟล์ใน final/ {len(exports)} ไฟล์ ใช้ไฟล์ล่าสุด: {final_file.name}")
+        chosen = str(brief.get("final_file") or "").strip()
+        final_file = None
+        ambiguous = ""
+        if chosen:
+            final_file = next((item for item in exports if item.name == chosen), None)
+            if not final_file:
+                ambiguous = f"brief ระบุ final_file `{chosen}` แต่ไม่มีไฟล์นั้นใน `final/`"
+        elif len(exports) > 1:
+            # mtime cannot be trusted as a revision order once files are copied around.
+            ambiguous = (
+                f"มีไฟล์ใน `final/` {len(exports)} ไฟล์ ({', '.join(item.name for item in exports)}) "
+                f"ให้เหลือไฟล์เดียว หรือระบุ `final_file` ใน `brief.json`"
+            )
+        elif exports:
+            final_file = exports[0]
+        if ambiguous:
+            print(f"[note] {ambiguous}")
+            actions.append(ambiguous)
         ready_to_cut = (
             stages["script"] == "done"
             and stages["shot_list"] == "done"
@@ -1332,7 +1345,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         if broken_export:
             print(f"[note] `final/{final_file.name}` {broken_export} ต้อง export ใหม่")
             actions.append(f"ไฟล์ `final/{final_file.name}` ใช้ไม่ได้: {broken_export}")
-        if final_file and ready_to_cut and not stale_export and not broken_export:
+        if final_file and ready_to_cut and not stale_export and not broken_export and not ambiguous:
             stages["edit"] = "done"
         elif ready_to_cut:
             stages["edit"] = "ready"
