@@ -227,26 +227,47 @@ def media_duration(path: Path) -> float:
     return _DURATIONS[key]
 
 
-def voice_overruns_scene(scene: dict, asset: "Path | None") -> float:
+def voice_overruns_scene(scene: dict, asset: "Path | None", raw_bps: int = 0) -> float:
     """How many seconds the take is longer than the scene it has to sit in."""
     planned = as_float(scene.get("duration_sec"), 0)
     if asset is None or planned <= 0:
         return 0.0
-    spoken = media_duration(asset)
+    if asset.suffix.lower() in RAW_AUDIO_SUFFIXES:
+        spoken = asset.stat().st_size / raw_bps if raw_bps > 0 else 0.0
+    else:
+        spoken = media_duration(asset)
     if spoken <= 0:
         return 0.0
     tolerance = max(1.0, planned * 0.2)
     return spoken - planned if spoken - planned > tolerance else 0.0
 
 
-def usable_asset(path: "Path | None", kind: str) -> bool:
+def raw_bytes_per_second(fields_config: dict) -> int:
+    """Bytes per second implied by the configured raw output format, 0 if unknown."""
+    fmt = str((fields_config.get("elevenlabs") or {}).get("output_format", "")).lower()
+    match = re.match(r"(pcm|ulaw|alaw)_(\d+)", fmt)
+    if not match:
+        return 0
+    rate = int(match.group(2))
+    return rate * 2 if match.group(1) == "pcm" else rate
+
+
+def usable_asset(path: "Path | None", kind: str, raw_bps: int = 0) -> bool:
     """A placeholder, a saved error page or a half-finished download is not an asset."""
     if path is None:
         return False
     if path.stat().st_size < MIN_MEDIA_BYTES:
         return False
     if kind == "audio" and path.suffix.lower() in RAW_AUDIO_SUFFIXES:
-        return True  # raw formats carry no header at all
+        # No header to read: judge it by the length the configured format implies.
+        if raw_bps <= 0:
+            warn_once(
+                f"rawfmt:{path}",
+                f"[warn] {path.name} เป็นไฟล์ดิบที่ไม่มี header ตรวจไม่ได้ "
+                f"เพราะ output_format ใน config ไม่ได้บอกอัตราสุ่ม",
+            )
+            return False
+        return path.stat().st_size >= raw_bps * 0.5
     try:
         head = path.open("rb").read(16)
     except OSError:
@@ -259,11 +280,11 @@ def usable_asset(path: "Path | None", kind: str) -> bool:
     return not _MEDIA_VERDICTS[key]
 
 
-def checked_asset(directory: Path, stem: str, suffixes: list, kind: str) -> "Path | None":
+def checked_asset(directory: Path, stem: str, suffixes: list, kind: str, raw_bps: int = 0) -> "Path | None":
     asset = find_asset(directory, stem, suffixes)
     if asset is None:
         return None
-    if not usable_asset(asset, kind):
+    if not usable_asset(asset, kind, raw_bps):
         reason = _MEDIA_VERDICTS.get((str(asset), asset_stamp(asset), kind)) or "ไฟล์เสียหรือยังไม่สมบูรณ์"
         warn_once(f"broken:{asset}", f"[warn] {directory.name}/{asset.name} ใช้ไม่ได้: {reason}")
         return None
@@ -913,9 +934,15 @@ def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str) -> bool
         return False
     if entry.get("v") != SOURCE_LOG_VERSION:
         # A tool-template change moved the fingerprint, so the old hash cannot be
-        # compared. Carry the verdict we already recorded instead of blessing the job.
+        # compared. Carry the verdict we already recorded, and for a stale one leave
+        # the hash empty so it stays stale until the derived file is rewritten.
         carried = bool(entry.get("stale"))
-        log[key] = {"stamp": stamp, "source_sha": source_sha, "v": SOURCE_LOG_VERSION, "stale": carried}
+        log[key] = {
+            "stamp": stamp,
+            "source_sha": "" if carried else source_sha,
+            "v": SOURCE_LOG_VERSION,
+            "stale": carried,
+        }
         write_json(job.path / "source-log.json", log)
         return carried
     stale = entry.get("source_sha") != source_sha
@@ -1232,12 +1259,13 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         voiced = [s for s in scenes if str(s.get("vo") or "").strip()]
         render_log = read_render_log(job.voice_dir)
         voice_sha = voice_fingerprint(fields_config, job.voice_dir)
+        raw_bps = raw_bytes_per_second(fields_config)
         voice_assets = {
-            str(s.get("id", "")): checked_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES, "audio")
+            str(s.get("id", "")): checked_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES, "audio", raw_bps)
             for s in voiced
         }
         overrunning = [
-            (s, voice_overruns_scene(s, voice_assets[str(s.get("id", ""))]))
+            (s, voice_overruns_scene(s, voice_assets[str(s.get("id", ""))], raw_bps))
             for s in voiced
         ]
         overrunning = [(s, extra) for s, extra in overrunning if extra > 0]
@@ -1266,7 +1294,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
 
     # --- edit ---
     if shots and scenes:
-        write_assembly_sheet(job, brief, script, shots)
+        write_assembly_sheet(job, brief, script, shots, raw_bytes_per_second(fields_config))
         write_text(job.path / "06-edit-notes.md", edit_notes(brief, script, shots))
         final_file = latest_file(job.final_dir, FINAL_SUFFIXES)
         exports = matching_files(job.final_dir, FINAL_SUFFIXES)
@@ -1349,7 +1377,7 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
         for scene in scenes:
             scene_id = str(scene.get("id") or "").strip() or "sc-xx"
             vo_text = str(scene.get("vo") or "").strip()
-            existing = checked_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES, "audio")
+            existing = checked_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES, "audio", raw_bytes_per_second(fields_config))
             if not vo_text:
                 status = "no-vo"
             elif not existing:
@@ -1370,7 +1398,7 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
             )
 
 
-def write_assembly_sheet(job: Job, brief: dict, script: dict, shots: list) -> None:
+def write_assembly_sheet(job: Job, brief: dict, script: dict, shots: list, raw_bps: int = 0) -> None:
     scenes = {str(scene.get("id")): scene for scene in script.get("scenes", [])}
     path = job.path / "06-assembly-sheet.csv"
     fields = [
@@ -1400,7 +1428,7 @@ def write_assembly_sheet(job: Job, brief: dict, script: dict, shots: list) -> No
             scene = scenes.get(scene_id, {})
             still = checked_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES, "image")
             clip = checked_asset(job.clips_dir, shot_id, CLIP_SUFFIXES, "clip")
-            voice = checked_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES, "audio")
+            voice = checked_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES, "audio", raw_bps)
             silent = not str(scene.get("vo") or "").strip()
             first_of_scene = scene_id not in voiced_rows
             voiced_rows.add(scene_id)
