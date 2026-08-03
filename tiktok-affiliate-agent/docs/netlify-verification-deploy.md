@@ -14,27 +14,19 @@ This project is ready to deploy a tiny static verification site to Netlify.
 The TikTok verification file is:
 
 ```text
-public/tiktokvHxgWObij8HtLXiJy2QdUY5BVI4bWcMn.txt
-```
-
-Compatibility copies are also published at:
-
-```text
-public/tiktok-developers-site-verification
-public/.well-known/tiktok-developers-site-verification.txt
-public/.well-known/tiktok-developers-site-verification
+public/tiktok-developers-site-verification.txt
 ```
 
 After deploy, the URL should be:
 
 ```text
-https://spontaneous-conkies-a04ee3.netlify.app/tiktokvHxgWObij8HtLXiJy2QdUY5BVI4bWcMn.txt
+https://spontaneous-conkies-a04ee3.netlify.app/tiktok-developers-site-verification.txt
 ```
 
 It must show exactly:
 
 ```text
-tiktok-developers-site-verification=vHxgWObij8HtLXiJy2QdUY5BVI4bWcMn
+tiktok-developers-site-verification=NXqfMa78DDVE3kfChv83eL0tFQQ8Y3p6
 ```
 
 ## Deploy Steps
