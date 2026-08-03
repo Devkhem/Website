@@ -74,6 +74,19 @@ def voice_fingerprint(voice_id: str, settings: dict) -> str:
     return text_fingerprint("|".join(parts))
 
 
+def read_voice_override(voice_dir: Path) -> str:
+    """The voice this job was rendered with, so a plain rerun keeps using it."""
+    path = voice_dir / "settings.json"
+    if not path.exists():
+        return ""
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return ""
+    return str(saved.get("voice_id") or "").strip() if isinstance(saved, dict) else ""
+
+
 def write_voice_override(voice_dir: Path, voice_id: str) -> None:
     """Remember only an explicit `--voice-id`, so `sync` stops undoing it.
 
@@ -190,7 +203,11 @@ def main(argv: "list | None" = None) -> None:
             raise SystemExit(f"ไม่พบซีน {args.scene} ใน lines.csv")
 
     api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-    voice_id = (args.voice_id or os.environ.get("ELEVENLABS_VOICE_ID", "")).strip()
+    voice_id = (
+        args.voice_id.strip()
+        or read_voice_override(voice_dir)
+        or os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
+    )
 
     render_log = read_render_log(voice_dir)
     pending = []
@@ -277,7 +294,7 @@ def main(argv: "list | None" = None) -> None:
         write_render_log(voice_dir, render_log)
         print(f"[ok] {scene_id} -> {output.name} ({len(audio)} bytes)")
 
-    if failed < len(pending) and args.voice_id:
+    if failed < len(pending) and args.voice_id.strip():
         write_voice_override(voice_dir, voice_id)
 
     print()

@@ -84,6 +84,7 @@ python3 scripts/prepare_api_image.py outputs/<วันที่>/room-407-chatg
 
 เกณฑ์ตัดสิน:
 
+- ยังไม่มี retention: โพสต์ตอนแรกก่อน ตอนที่เหลือรอผล (ดูคอลัมน์ `post_status`)
 - Retention >= 35%: ทำตอนต่อจาก premise เดิม
 - Retention 25-34%: ใช้ภาพเดิม แต่เปลี่ยน hook
 - Retention < 20%: เปลี่ยน premise/location

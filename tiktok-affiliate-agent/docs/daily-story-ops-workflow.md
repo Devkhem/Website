@@ -22,7 +22,8 @@ cat data/story_metrics.csv
 - ถ้ามี retention 25-34%: ใช้ premise เดิม แต่เปลี่ยน hook
   (ต้องเขียน hook ใหม่แล้วรัน `run_story_channel_plan.py --hook "ประโยคเปิดใหม่"` ไม่งั้นจะไม่ออก package)
 - ถ้า retention < 20%: เปลี่ยน premise
-- ถ้ายังไม่มี retention: ทดสอบ premise ใหม่หรือโพสต์ตอนแรกที่มีอยู่ก่อน
+- ถ้ายังไม่มี retention: โพสต์เฉพาะตอนที่ `post_status` เป็น `post_now` ใน queue
+  ตอนที่เหลือเตรียมไว้ก่อน อย่าเพิ่งโพสต์จนกว่าจะรู้ retention
 
 ## Stage 1: Create Daily Plan
 

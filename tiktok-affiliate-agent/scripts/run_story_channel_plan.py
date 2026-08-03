@@ -100,7 +100,7 @@ def retention_thresholds(config: dict) -> tuple:
 def decision_from_metrics(config: dict, metrics: list) -> tuple:
     """Return (key, ข้อความอธิบาย) so the plan and the packages agree."""
     if not metrics:
-        return "no_data", "ยังไม่มี retention ให้ใช้ premise เดิมและโพสต์ทดสอบ 3 ตอนแรก"
+        return "no_data", "ยังไม่มี retention ให้เตรียม 3 ตอน แต่โพสต์ตอนแรกก่อน แล้ววัด retention ที่ 2 ชั่วโมง"
     latest = metrics[-1]
     retention = parse_float(latest.get("retention_percent"))
     kill, rewrite, strong = retention_thresholds(config)
@@ -308,6 +308,16 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
                 "",
             ]
         )
+    if len(packages) > 1:
+        lines.extend(
+            [
+                "## ลำดับการโพสต์",
+                "",
+                "โพสต์เฉพาะตอนที่ `post_status` เป็น `post_now` ก่อน แล้ววัด retention ที่ 2 ชั่วโมง",
+                "ตอนที่เหลือเตรียมไว้ก่อน อย่าเพิ่งโพสต์จนกว่าจะรู้ผล",
+                "",
+            ]
+        )
     lines.extend(
         [
             "## After Posting",
@@ -328,12 +338,15 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
 
 
 def write_queue(path: Path, packages: list[dict[str, str]]) -> None:
-    fields = ["series_id", "episode", "clip_id", "title", "hook", "posting_time", "caption", "hashtags"]
+    fields = ["series_id", "episode", "clip_id", "title", "hook", "posting_time", "post_status", "caption", "hashtags"]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        for package in packages:
-            writer.writerow({field: package[field] for field in fields})
+        for index, package in enumerate(packages):
+            row = {field: package.get(field, "") for field in fields}
+            # The ops gate is: post one, wait two hours, read retention, then decide.
+            row["post_status"] = "post_now" if index == 0 else "hold_until_retention"
+            writer.writerow(row)
 
 
 def write_episode_packages(output_dir: Path, packages: list) -> None:
@@ -401,7 +414,6 @@ def main() -> None:
     ]
     episodes = select_episodes(series, decision_key, posted, latest_episode_number(metrics))
     needs_hook = decision_key == "rewrite_hook" and not args.hook.strip()
-    wants_new_image = decision_key not in {"kill", "rewrite_hook"}
     if needs_hook:
         # Emitting the old hook again would repeat the test we just failed.
         episodes = []
@@ -409,6 +421,8 @@ def main() -> None:
         episode_package(series, episode, posting_windows[index % len(posting_windows)], decision_key, args.hook.strip())
         for index, episode in enumerate(episodes)
     ]
+    # An image with no package to make would spend the daily budget for nothing.
+    wants_new_image = bool(packages) and decision_key not in {"kill", "rewrite_hook"}
 
     output_dir = Path(args.out) / args.date
     output_dir.mkdir(parents=True, exist_ok=True)

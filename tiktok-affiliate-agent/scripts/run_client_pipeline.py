@@ -586,13 +586,22 @@ def wants_subtitles(brief: dict) -> bool:
     return str(brief.get("subtitles", "auto")).strip().lower() not in {"none", "no", "off", "ไม่ใส่", "ไม่มี"}
 
 
+def parse_ratio(value: str):
+    """Read `9:16`, `9 x 16`, or `9:16 (แนวตั้ง)`; None when there is no ratio in it."""
+    match = re.search(r"(\d+(?:\.\d+)?)\s*[:xX/]\s*(\d+(?:\.\d+)?)", str(value or ""))
+    if not match:
+        return None
+    width, height = float(match.group(1)), float(match.group(2))
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
 def orientation_hint(aspect_ratio: str) -> str:
-    parts = re.split(r"[:xX/]", str(aspect_ratio or "").strip())
-    try:
-        width = float(parts[0])
-        height = float(parts[1])
-    except (IndexError, ValueError):
+    ratio = parse_ratio(aspect_ratio)
+    if not ratio:
         return "vertical"
+    width, height = ratio
     if abs(width - height) < 0.001:
         return "square"
     return "vertical" if height > width else "horizontal"
@@ -884,11 +893,13 @@ def export_problem(final_file: Path, brief: dict) -> str:
         if abs(duration - target) > tolerance:
             return f"ความยาว {duration:g} วินาที ไม่ตรงกับ brief {target:g} วินาที"
     wanted = str(brief.get("aspect_ratio") or "").strip()
-    parts = re.split(r"[:xX/]", wanted)
-    if width and height and len(parts) == 2:
-        want = as_float(parts[0], 0) / as_float(parts[1], 1) if as_float(parts[1], 0) else 0
+    if wanted and width and height:
+        ratio = parse_ratio(wanted)
+        if not ratio:
+            return f"อ่าน aspect_ratio ใน brief ไม่ออก: {wanted!r} ให้แก้เป็นรูปแบบ 9:16"
+        want = ratio[0] / ratio[1]
         actual = width / height
-        if want and abs(actual - want) / want > 0.02:
+        if abs(actual - want) / want > 0.02:
             return f"สัดส่วนภาพ {width:g}x{height:g} ไม่ตรงกับ brief {wanted}"
     return ""
 
@@ -980,10 +991,16 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         runtime_problem = script_duration_problem(brief, script) or script_scene_count_problem(brief, script)
         script_stale = derived_is_stale(job, "script", job.script_path, script_source_fingerprint(brief, brand_bible))
         bible_ready = stages["brand_bible"] == "done"
-        stages["script"] = "ready" if (runtime_problem or script_stale) else ("done" if bible_ready else "waiting")
-        if runtime_problem:
+        if not bible_ready:
+            # Regenerating now would embed the Brand Bible that is about to change.
+            stages["script"] = "waiting"
+        elif runtime_problem or script_stale:
+            stages["script"] = "ready"
+        else:
+            stages["script"] = "done"
+        if runtime_problem and bible_ready:
             actions.append(f"แก้ `script.json` หรือปรับ `brief.json`: {runtime_problem}")
-        if script_stale:
+        if script_stale and bible_ready:
             actions.append("brief หรือ brand bible ถูกแก้หลังเขียนสคริปต์ ให้รัน prompt ใน `02-script-prompt.md` ใหม่")
     else:
         stages["script"] = "ready" if stages["brand_bible"] == "done" else "waiting"
@@ -1010,9 +1027,11 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         stages["shot_list"] = "ready"
         for problem in problems:
             actions.append(f"แก้ `shot-list.json`: {problem}")
-    elif script:
+    elif script_ok:
         stages["shot_list"] = "ready"
         actions.append("รัน prompt ใน `03-shot-list-prompt.md` แล้วบันทึกผลเป็น `shot-list.json`")
+    elif script:
+        stages["shot_list"] = "waiting"
     else:
         stages["shot_list"] = "blocked"
 
