@@ -1013,12 +1013,25 @@ def export_problem(final_file: Path, brief: dict) -> str:
 
 
 def content_identity(path: Path) -> str:
-    """Name, size and a hash of the head — survives a copy that preserves mtime."""
+    """Name, size and a digest of both ends — survives a copy that preserves mtime.
+
+    Hashing whole clips on every sync would read hundreds of megabytes; head plus
+    tail catches a re-render or a corrected ending, which is what actually happens.
+    """
+    window = 262144
     try:
-        head = path.open("rb").read(262144)
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            head = handle.read(window)
+            if size > window:
+                handle.seek(max(size - window, window))
+                tail = handle.read(window)
+            else:
+                tail = b""
     except OSError:
         return f"{path.name}:unreadable"
-    return f"{path.name}:{path.stat().st_size}:{hashlib.sha1(head).hexdigest()[:12]}"
+    digest = hashlib.sha1(head + tail).hexdigest()[:16]
+    return f"{path.name}:{size}:{digest}"
 
 
 def export_inputs_fingerprint(job: Job) -> str:
@@ -1493,6 +1506,8 @@ def archive_derived(job: Job) -> list:
     ]
     if not items:
         return []
+    # The old brief stays in place for cmd_new to overwrite, but the archive keeps a
+    # copy so the archived work can still be audited against what was asked for.
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     target = job.path / f"archive-{stamp}"
     counter = 2
@@ -1504,6 +1519,9 @@ def archive_derived(job: Job) -> list:
     for item in items:
         item.rename(target / item.name)
         moved.append(item.name)
+    if job.brief_path.exists():
+        shutil.copy2(job.brief_path, target / job.brief_path.name)
+        moved.append(f"{job.brief_path.name} (คัดลอก)")
     return moved
 
 

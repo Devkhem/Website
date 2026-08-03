@@ -435,8 +435,18 @@ def main() -> None:
     if needs_hook:
         # Emitting the old hook again would repeat the test we just failed.
         episodes = []
+    # The window belongs to the episode's place in the series, so a rerun that
+    # releases episode 2 keeps its 18:30 slot instead of taking episode 1's noon.
+    all_episodes = series.get("episodes", [])
+    positions = {int(item.get("episode", 0)): index for index, item in enumerate(all_episodes)}
     packages = [
-        episode_package(series, episode, posting_windows[index % len(posting_windows)], decision_key, args.hook.strip())
+        episode_package(
+            series,
+            episode,
+            posting_windows[positions.get(int(episode.get("episode", 0)), index) % len(posting_windows)],
+            decision_key,
+            args.hook.strip(),
+        )
         for index, episode in enumerate(episodes)
     ]
     # One mother image serves the whole series: only a premise with nothing posted yet

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import http.client
 import json
 import os
 import socket
@@ -277,7 +278,7 @@ def main(argv: "list | None" = None) -> None:
             print(f"[fail] {scene_id}: HTTP {error.code} {detail}")
             failed += 1
             continue
-        except (urllib.error.URLError, TimeoutError, socket.timeout) as error:
+        except (urllib.error.URLError, TimeoutError, socket.timeout, http.client.HTTPException) as error:
             reason = getattr(error, "reason", error)
             print(f"[fail] {scene_id}: {reason}")
             failed += 1
