@@ -63,7 +63,9 @@ AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
 AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 FINAL_SUFFIXES = [".mp4", ".mov"]
 ASSET_LOG_VERSION = 4
-SOURCE_LOG_VERSION = 2
+# Bump when a prompt template changes, so existing jobs adopt the new fingerprint
+# instead of being told their script is stale by a tool update.
+SOURCE_LOG_VERSION = 3
 
 
 # ---------------------------------------------------------------- utilities
