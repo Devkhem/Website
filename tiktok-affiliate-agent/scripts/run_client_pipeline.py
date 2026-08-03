@@ -188,13 +188,16 @@ def read_render_log(voice_dir: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def voice_is_stale(scene: dict, log: dict) -> bool:
+def voice_is_stale(scene: dict, log: dict, asset: "Path | None") -> bool:
     """True when the recorded audio was synthesized from older script text.
 
-    Manually recorded audio has no log entry, so it is never called stale.
+    The log entry only applies to the file it names. Audio recorded by hand — or a
+    manual take that replaced a synthesized one — is never called stale.
     """
     record = log.get(str(scene.get("id") or ""))
     if not isinstance(record, dict) or not record.get("text_sha"):
+        return False
+    if asset is not None and record.get("file") and record["file"] != asset.name:
         return False
     return record["text_sha"] != text_fingerprint(scene.get("vo"))
 
@@ -606,17 +609,90 @@ class Job:
         return payload
 
 
-def uncovered_scenes(script: dict, shots: list) -> list:
-    """Scenes that no shot references — editing cannot be ready while any exist."""
+def shot_list_problems(script: dict, shots: list) -> list:
+    """Everything that would make the assembly sheet unbuildable.
+
+    Editing must not go ready while a scene has no visuals, a shot points at a
+    scene that does not exist, or a scene's shots do not add up to its runtime.
+    """
     if not script or not shots:
         return []
-    covered = {str(shot.get("scene_id") or "").strip() for shot in shots}
-    missing = []
-    for scene in script.get("scenes", []):
-        scene_id = str(scene.get("id") or "").strip()
-        if scene_id and scene_id not in covered:
-            missing.append(scene_id)
-    return missing
+    scenes = {str(scene.get("id") or ""): scene for scene in script.get("scenes", []) if scene.get("id")}
+    covered = {}
+    for shot in shots:
+        covered.setdefault(str(shot.get("scene_id") or ""), []).append(shot)
+
+    problems = []
+    missing = sorted(scene_id for scene_id in scenes if scene_id not in covered)
+    if missing:
+        problems.append(f"ซีนที่ยังไม่มีช็อต: {', '.join(missing)}")
+    orphans = sorted(scene_id for scene_id in covered if scene_id not in scenes)
+    if orphans:
+        problems.append(f"ช็อตอ้างถึงซีนที่ไม่มีในสคริปต์: {', '.join(orphans) or '(ว่าง)'}")
+    for scene_id in sorted(scene_id for scene_id in scenes if scene_id in covered):
+        planned = as_float(scenes[scene_id].get("duration_sec"), 0)
+        total = sum(as_float(shot.get("duration_sec"), 0) for shot in covered[scene_id])
+        if planned and abs(total - planned) > 1:
+            problems.append(f"{scene_id} เวลาช็อตรวม {total:g} วินาที ไม่ตรงกับซีน {planned:g} วินาที")
+    return problems
+
+
+def shot_image_fingerprint(shot: dict) -> str:
+    parts = [shot.get("image_prompt"), shot.get("description"), shot.get("framing"), shot.get("negative")]
+    return text_fingerprint("|".join(str(part or "") for part in parts))
+
+
+def shot_motion_fingerprint(shot: dict) -> str:
+    parts = [shot.get("motion_prompt"), shot.get("camera_move"), shot.get("duration_sec")]
+    return text_fingerprint("|".join(str(part or "") for part in parts))
+
+
+def track_shot_assets(job: Job, shots: list) -> dict:
+    """Report missing and stale stills/clips, remembering what each asset was made from.
+
+    A file that appears or changes on disk is taken to match the definition current
+    at that moment; if the definition changes afterwards the asset becomes stale.
+    """
+    log_path = job.path / "asset-log.json"
+    log = {}
+    if log_path.exists():
+        try:
+            loaded = read_json(log_path)
+            log = loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            log = {}
+
+    result = {"missing_stills": [], "stale_stills": [], "missing_clips": [], "stale_clips": []}
+    for shot in shots:
+        shot_id = str(shot.get("id") or "")
+        record = log.get(shot_id) if isinstance(log.get(shot_id), dict) else {}
+        for kind, directory, suffixes, fingerprint in (
+            ("still", job.stills_dir, IMAGE_SUFFIXES, shot_image_fingerprint(shot)),
+            ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot)),
+        ):
+            asset = find_asset(directory, shot_id, suffixes)
+            if not asset:
+                result["missing_" + kind + "s"].append(shot_id)
+                record.pop(kind, None)
+                continue
+            stamp = f"{asset.name}:{int(asset.stat().st_mtime)}"
+            entry = record.get(kind) if isinstance(record.get(kind), dict) else {}
+            if entry.get("asset") != stamp:
+                record[kind] = {"asset": stamp, "sha": fingerprint}
+            elif entry.get("sha") != fingerprint:
+                result["stale_" + kind + "s"].append(shot_id)
+        log[shot_id] = record
+    write_json(log_path, log)
+    return result
+
+
+def newest_input_mtime(job: Job) -> float:
+    """Latest change among the things a Premiere export is built from."""
+    paths = [job.script_path, job.shot_list_path, job.brief_path]
+    paths += matching_files(job.clips_dir, CLIP_SUFFIXES)
+    paths += matching_files(job.voice_dir, AUDIO_SUFFIXES)
+    stamps = [path.stat().st_mtime for path in paths if path.exists()]
+    return max(stamps) if stamps else 0.0
 
 
 def audio_extension(fields_config: dict) -> str:
@@ -667,12 +743,13 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         write_text(job.path / "03-shot-list-prompt.md", shot_list_prompt(brief, script, rules, brand_bible))
     shot_list = job.load_stage_json(job.shot_list_path, "shots")
     shots = shot_list.get("shots", []) if shot_list else []
-    uncovered = uncovered_scenes(script, shots)
-    if shots and not uncovered:
+    problems = shot_list_problems(script, shots)
+    if shots and not problems:
         stages["shot_list"] = "done"
     elif shots:
         stages["shot_list"] = "ready"
-        actions.append(f"`shot-list.json` ยังไม่มีช็อตให้ซีน {', '.join(uncovered)} ต้องเพิ่มก่อนถึงจะตัดต่อได้")
+        for problem in problems:
+            actions.append(f"แก้ `shot-list.json`: {problem}")
     elif script:
         stages["shot_list"] = "ready"
         actions.append("รัน prompt ใน `03-shot-list-prompt.md` แล้วบันทึกผลเป็น `shot-list.json`")
@@ -691,14 +768,22 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         write_text(image_dir / "README.md", asset_index(shots, "stills", "png"))
         write_text(flow_dir / "README.md", asset_index(shots, "clips", "mp4"))
 
-        missing_stills = [s for s in shots if not find_asset(job.stills_dir, str(s.get("id", "")), IMAGE_SUFFIXES)]
-        missing_clips = [s for s in shots if not find_asset(job.clips_dir, str(s.get("id", "")), CLIP_SUFFIXES)]
-        stages["stills"] = "done" if not missing_stills else "ready"
-        stages["animate"] = "done" if not missing_clips else ("ready" if not missing_stills else "waiting")
-        if missing_stills:
-            actions.append(f"สร้างภาพนิ่ง {len(missing_stills)} ช็อตที่ยังขาด แล้ววางใน `stills/` (ดู `04-image-prompts/`)")
-        if missing_clips and stages["animate"] == "ready":
-            actions.append(f"animate {len(missing_clips)} ช็อตใน Google Flow แล้ววางใน `clips/` (ดู `05-flow-prompts/`)")
+        tracked = track_shot_assets(job, shots)
+        stills_pending = tracked["missing_stills"] + tracked["stale_stills"]
+        clips_pending = tracked["missing_clips"] + tracked["stale_clips"]
+        stages["stills"] = "done" if not stills_pending else "ready"
+        stages["animate"] = "done" if not clips_pending else ("ready" if not stills_pending else "waiting")
+        for kind, label, pending, stale in (
+            ("stills", "สร้างภาพนิ่ง", stills_pending, tracked["stale_stills"]),
+            ("clips", "animate ใน Google Flow", clips_pending, tracked["stale_clips"]),
+        ):
+            if not pending:
+                continue
+            if stale:
+                print(f"[note] {kind} ของช็อต {', '.join(stale)} ทำมาจาก shot list เวอร์ชันเก่า ต้องทำใหม่")
+            if kind == "stills" or stages["animate"] == "ready":
+                folder = "04-image-prompts" if kind == "stills" else "05-flow-prompts"
+                actions.append(f"{label} {len(pending)} ช็อตที่ยังไม่พร้อม แล้ววางใน `{kind}/` (ดู `{folder}/`)")
     else:
         stages["stills"] = "blocked"
         stages["animate"] = "blocked"
@@ -709,11 +794,12 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         write_voice_lines(job, brief, scenes, fields_config)
         voiced = [s for s in scenes if str(s.get("vo") or "").strip()]
         render_log = read_render_log(job.voice_dir)
-        stale_vo = [s for s in voiced if find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES) and voice_is_stale(s, render_log)]
+        voice_assets = {str(s.get("id", "")): find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES) for s in voiced}
+        stale_vo = [s for s in voiced if voice_assets[str(s.get("id", ""))] and voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))])]
         missing_vo = [
             s
             for s in voiced
-            if not find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES) or voice_is_stale(s, render_log)
+            if not voice_assets[str(s.get("id", ""))] or voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))])
         ]
         stages["voiceover"] = "done" if not missing_vo else "ready"
         if stale_vo:
@@ -738,7 +824,15 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         ready_to_cut = (
             stages["shot_list"] == "done" and stages["animate"] == "done" and stages["voiceover"] == "done"
         )
-        stages["edit"] = "done" if final_file else ("ready" if ready_to_cut else "waiting")
+        stale_export = bool(final_file) and final_file.stat().st_mtime < newest_input_mtime(job)
+        if final_file and ready_to_cut and not stale_export:
+            stages["edit"] = "done"
+        elif ready_to_cut:
+            stages["edit"] = "ready"
+        else:
+            stages["edit"] = "waiting"
+        if stale_export:
+            print(f"[note] `final/{final_file.name}` เก่ากว่าสคริปต์หรือไฟล์ที่ใช้ตัด ต้อง export ใหม่ก่อนส่งรีวิว")
         if stages["edit"] == "ready":
             actions.append("ตัดใน Premiere Pro ตาม `06-assembly-sheet.csv` แล้ว export ลง `final/`")
     else:
@@ -746,7 +840,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         final_file = None
 
     # --- review ---
-    if final_file:
+    if final_file and stages["edit"] == "done":
         write_text(job.path / "07-review-packet.md", review_packet(job, brief, script, shots, final_file))
         stages["review"] = "ready"
         actions.append("ส่ง `07-review-packet.md` + ไฟล์ใน `final/` ให้ลูกค้ารีวิว")
@@ -789,7 +883,7 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
             elif not existing:
                 status = "todo"
             else:
-                status = "stale" if voice_is_stale(scene, render_log) else "done"
+                status = "stale" if voice_is_stale(scene, render_log, existing) else "done"
             writer.writerow(
                 {
                     "scene_id": scene_id,
