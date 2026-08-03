@@ -71,8 +71,21 @@ public/tiktok-developers-site-verification.txt
 Current Netlify verification URL:
 
 ```text
-https://spontaneous-conkies-a04ee3.netlify.app/tiktok-developers-site-verification.txt
+https://spontaneous-conkies-a04ee3.netlify.app/tiktokvHxgWObij8HtLXiJy2QdUY5BVI4bWcMn.txt
 ```
+
+If TikTok still says it cannot find the signature even when the URL returns `200 OK`, check these in order:
+
+1. Make sure the downloaded signature file is from the same URL prefix verification attempt. If you click through a new verification attempt, TikTok may provide a different file name/token.
+2. Make sure you are verifying in the same mode shown in the app page, usually Production mode.
+3. Try URL prefix both with and without a trailing slash:
+
+```text
+https://spontaneous-conkies-a04ee3.netlify.app/
+https://spontaneous-conkies-a04ee3.netlify.app
+```
+
+4. If both fail, use a custom domain connected to Netlify and verify by Domain/DNS TXT instead. A `netlify.app` subdomain may be publicly reachable but still not accepted by TikTok as an owned URL property for this workflow.
 
 This project is configured for Netlify static deploy through `netlify.toml`. See:
 

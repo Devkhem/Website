@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import shutil
 import subprocess
@@ -98,6 +99,7 @@ FONT_HELP = (
 )
 
 _FONT_PATH = ""
+HANDLE = "@thatslife6969"
 F22 = F26 = F30 = F38 = F48 = F60 = None
 
 
@@ -106,21 +108,40 @@ def find_thai_font(explicit: str = "") -> str:
     if explicit:
         if not Path(explicit).exists():
             raise SystemExit(f"ไม่พบไฟล์ฟอนต์: {explicit}")
+        if not renders_thai(explicit):
+            print(f"[warn] {explicit} อาจไม่มีตัวอักษรไทย ตัวหนังสืออาจกลายเป็นกล่องสี่เหลี่ยม")
         return explicit
     for item in FONT_CANDIDATES:
-        if Path(item).exists():
+        if Path(item).exists() and renders_thai(item):
             return item
-    matcher = shutil.which("fc-match")
-    if matcher:
+    lister = shutil.which("fc-list")
+    if lister:
+        # fc-list filters by language; fc-match would hand back a best-effort
+        # substitute even when nothing on the system covers Thai.
         try:
-            found = subprocess.run(
-                [matcher, "-f", "%{file}", ":lang=th"], capture_output=True, text=True, timeout=10
-            ).stdout.strip()
+            output = subprocess.run(
+                [lister, ":lang=th", "--format=%{file}\n"], capture_output=True, text=True, timeout=10
+            ).stdout
         except (OSError, subprocess.SubprocessError):
-            found = ""
-        if found and Path(found).exists():
-            return found
+            output = ""
+        for line in output.splitlines():
+            candidate = line.strip()
+            if candidate and Path(candidate).exists() and renders_thai(candidate):
+                return candidate
     return ""
+
+
+def renders_thai(path: str) -> bool:
+    """A font that has no Thai glyph draws the same .notdef box for any missing code point."""
+    try:
+        probe = ImageFont.truetype(path, size=40)
+        thai = probe.getmask("ก")
+        missing = probe.getmask("\ue001")
+    except (OSError, ValueError):
+        return False
+    if not thai.getbbox():
+        return False
+    return bytes(thai) != bytes(missing)
 
 
 def font(size: int, bold: bool = False):
@@ -146,6 +167,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--out", default=str(ROOT / "outputs" / "2026-05-14"), help="Output date directory.")
     parser.add_argument("--font", default="", help="ไฟล์ฟอนต์ภาษาไทยที่จะใช้ ถ้าไม่ใส่จะหาให้เอง.")
+    parser.add_argument("--account", default=str(ROOT / "data" / "tiktok_account.json"), help="ไฟล์บัญชี TikTok ที่จะใช้ handle.")
+    parser.add_argument("--handle", default="", help="ทับ handle ที่จะพิมพ์ลงบนคลิป.")
     parser.add_argument("--frames-only", action="store_true", help="สร้างเฉพาะเฟรมกับเสียง ไม่ encode เป็น MP4.")
     return parser.parse_args()
 
@@ -268,7 +291,7 @@ def draw_frame(bg: Image.Image, episode: dict, episode_index: int, frame: int) -
     rounded(draw, (28, 28, W - 28, 40), 6, (70, 75, 86, 185))
     rounded(draw, (28, 28, 28 + progress, 40), 6, RED)
     draw.text((32, 58), f"ห้อง 407 ตอน {episode_index + 1}", font=F22, fill=MUTED)
-    draw.text((W - 32, 58), "@thatslife6969", font=F22, fill=MUTED, anchor="ra")
+    draw.text((W - 32, 58), HANDLE, font=F22, fill=MUTED, anchor="ra")
 
     if beat_index == 0:
         shake = int(math.sin(sec * 34) * 6 * (1 - local))
@@ -321,8 +344,25 @@ def render_episode(bg: Image.Image, episode: dict, episode_index: int, out_dir: 
     return frames_dir
 
 
+def resolve_handle(account_path: str, override: str) -> str:
+    if override:
+        return override if override.startswith("@") else f"@{override}"
+    path = Path(account_path)
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as handle_file:
+                handle = str(json.load(handle_file).get("handle") or "").strip()
+        except (json.JSONDecodeError, OSError):
+            handle = ""
+        if handle:
+            return handle if handle.startswith("@") else f"@{handle}"
+    return HANDLE
+
+
 def main() -> None:
+    global HANDLE
     args = parse_args()
+    HANDLE = resolve_handle(args.account, args.handle)
     load_fonts(args.font)
     out_dir = Path(args.out)
     videos_dir = out_dir / "videos"

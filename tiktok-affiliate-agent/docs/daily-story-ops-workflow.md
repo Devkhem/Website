@@ -171,13 +171,17 @@ data/story_metrics.csv
 ช่องที่ต้องกรอก:
 
 ```text
-date,series_id,episode,clip_id,posting_time,views,avg_watch_time_seconds,retention_percent,likes,comments,shares,saves,profile_visits,notes,next_action
+date,series_id,episode,clip_id,posting_time,measured_after_hours,views,avg_watch_time_seconds,retention_percent,likes,comments,shares,saves,profile_visits,notes,next_action
 ```
+
+`measured_after_hours` ใส่ 2 หรือ 24 ตามรอบที่วัด เกณฑ์ตัดสินใจใช้แถวที่วัดตอน 2 ชั่วโมง
+ให้เพิ่มแถวใหม่ทุกรอบที่วัด อย่าเขียนทับแถวเดิม
 
 ตัวอย่าง:
 
 ```csv
-2026-05-21,room-407,1,room-407-ep1,12:00,1200,7.8,36,88,12,3,9,4,hook ดี ทำต่อ,keep
+2026-05-21,room-407,1,room-407-ep1,12:00,2,1200,7.8,36,88,12,3,9,4,hook ดี ทำต่อ,keep
+2026-05-22,room-407,1,room-407-ep1,12:00,24,8600,9.1,31,240,31,12,26,18,,
 ```
 
 ## Stage 7: Decide Next Action

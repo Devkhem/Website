@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import re
 from datetime import date
 from pathlib import Path
 
@@ -39,7 +41,16 @@ def read_latest_metrics(path: Path, series_id: str) -> list:
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    rows = [row for row in rows if row.get("series_id") == series_id and row.get("retention_percent")]
+    kept = []
+    for row in rows:
+        if row.get("series_id") != series_id or not str(row.get("retention_percent") or "").strip():
+            continue
+        value = parse_float(row.get("retention_percent"), None)
+        if value is None or not math.isfinite(value) or value < 0:
+            print(f"[warn] ข้าม metrics แถวที่ retention_percent ใช้ไม่ได้: {row.get('retention_percent')!r}")
+            continue
+        kept.append(row)
+    rows = kept
     two_hour = [row for row in rows if str(row.get("measured_after_hours") or "").strip() == "2"]
     if two_hour:
         return two_hour
@@ -97,10 +108,13 @@ def select_episodes(series: dict, decision_key: str, posted: set) -> list:
         redo = [item for item in episodes if int(item.get("episode", 0)) in posted]
         return (redo or episodes)[:3]
     fresh = [item for item in episodes if int(item.get("episode", 0)) not in posted]
+    if decision_key == "test_more":
+        # The decision literally says "one more variation before deciding".
+        return (fresh or episodes)[:1]
     return (fresh or episodes)[:3]
 
 
-def parse_float(value, default: float = 0) -> float:
+def parse_float(value, default=0):
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -163,6 +177,20 @@ def episode_package(series: dict, episode: dict, posting_time: str, decision_key
     }
 
 
+def retention_rule_lines(config: dict) -> list:
+    """Rules straight from the config that made the decision, not a copy of it."""
+    rules = config.get("retention_rules", {})
+    strong = parse_float(rules.get("strong_continue", {}).get("two_hour_retention_percent"), 35)
+    rewrite = parse_float(rules.get("rewrite_hook", {}).get("two_hour_retention_percent"), 25)
+    kill = parse_float(rules.get("kill_premise", {}).get("two_hour_retention_percent"), 20)
+    return [
+        f"- retention (วัดที่ 2 ชั่วโมง) ต่ำกว่า {kill:g}% ให้หยุด premise",
+        f"- {rewrite:g}% ถึงต่ำกว่า {strong:g}% ให้ใช้ภาพเดิมแต่เปลี่ยน hook",
+        f"- {strong:g}% ขึ้นไป ให้ทำตอนต่อทันที",
+        f"- ระหว่าง {kill:g}% ถึงต่ำกว่า {rewrite:g}% ให้ทำอีก 1 variation ก่อนตัดสินใจ",
+    ]
+
+
 def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str) -> str:
     handle = account.get("handle", "@thatslife6969")
     lines = [
@@ -182,11 +210,9 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
         "## Production Rule",
         "",
         "- ใช้ภาพนี้ภาพเดียวให้ครบ 3 คลิปก่อนสร้างภาพใหม่",
-        "- ถ้า retention ตอนแรกต่ำกว่า 20% ให้หยุด premise",
-        "- ถ้า retention 25-34% ให้ใช้ภาพเดิมแต่เปลี่ยน hook",
-        "- ถ้า retention 35% ขึ้นไป ให้ทำตอนต่อทันที",
-        "",
     ]
+    lines.extend(retention_rule_lines(config))
+    lines.append("")
     if not packages:
         lines.extend(
             [
@@ -297,8 +323,15 @@ def render_episode_package(package: dict[str, str]) -> str:
     )
 
 
+def validate_date(value: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
+        raise SystemExit(f"--date ต้องเป็นรูปแบบ YYYY-MM-DD เท่านั้น แต่ได้: {value}")
+    return value
+
+
 def main() -> None:
     args = parse_args()
+    args.date = validate_date(args.date)
     config = read_json(Path(args.story))
     account = read_json(Path(args.account))
     series = select_series(config, args.series_id)

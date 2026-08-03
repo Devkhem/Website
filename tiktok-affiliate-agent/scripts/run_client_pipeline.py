@@ -644,6 +644,13 @@ def shot_list_problems(script: dict, shots: list) -> list:
         total = sum(as_float(shot.get("duration_sec"), 0) for shot in covered[scene_id])
         if planned and abs(total - planned) > 1:
             problems.append(f"{scene_id} เวลาช็อตรวม {total:g} วินาที ไม่ตรงกับซีน {planned:g} วินาที")
+    script_total = sum(as_float(scene.get("duration_sec"), 0) for scene in scenes.values())
+    shots_total = sum(as_float(shot.get("duration_sec"), 0) for shot in shots)
+    # Per-scene slack can add up, so the whole video has to line up as well.
+    if script_total and abs(shots_total - script_total) > 1:
+        problems.append(
+            f"เวลาช็อตรวมทั้งคลิป {shots_total:g} วินาที ไม่ตรงกับสคริปต์ {script_total:g} วินาที"
+        )
     return problems
 
 
@@ -700,6 +707,17 @@ def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str) -> bool
         write_json(job.path / "source-log.json", log)
         return False
     return entry["source_sha"] != source_sha
+
+
+def brand_bible_source_fingerprint(brief: dict, rules: dict) -> str:
+    """What the Brand Bible was written from: the client's brief plus the visual rules."""
+    fields = [
+        "client_name", "product", "goal", "audience", "tone", "platform", "aspect_ratio",
+        "duration_sec", "must_include", "avoid", "reference", "notes", "assets_link", "language",
+    ]
+    parts = [f"{field}={brief.get(field, '')}" for field in fields]
+    parts.append(f"rules={json.dumps(rules, ensure_ascii=False, sort_keys=True)}")
+    return text_fingerprint("\n".join(parts))
 
 
 def script_source_fingerprint(brief: dict, brand_bible: str) -> str:
@@ -819,8 +837,14 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     # --- brand bible ---
     write_text(job.path / "01-brand-bible-prompt.md", brand_bible_prompt(brief, rules))
     brand_bible = job.brand_bible_path.read_text(encoding="utf-8") if job.brand_bible_path.exists() else ""
-    if has_content(job.brand_bible_path):
+    bible_stale = has_content(job.brand_bible_path) and derived_is_stale(
+        job, "brand_bible", job.brand_bible_path, brand_bible_source_fingerprint(brief, rules)
+    )
+    if has_content(job.brand_bible_path) and not bible_stale:
         stages["brand_bible"] = "done"
+    elif bible_stale:
+        stages["brand_bible"] = "ready"
+        actions.append("brief ถูกแก้หลังทำ brand bible ให้รัน prompt ใน `01-brand-bible-prompt.md` ใหม่ก่อน")
     else:
         stages["brand_bible"] = "ready"
         actions.append("รัน prompt ใน `01-brand-bible-prompt.md` แล้วบันทึกผลเป็น `brand-bible.md`")
