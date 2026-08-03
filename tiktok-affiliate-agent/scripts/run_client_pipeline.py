@@ -852,13 +852,17 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     if shots and stages["shot_list"] == "done":
         image_dir = job.path / "04-image-prompts"
         flow_dir = job.path / "05-flow-prompts"
+        image_prompts = {}
+        flow_prompts = {}
         for shot in shots:
             shot_id = str(shot.get("id") or "").strip() or "sh-xx"
             still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
-            write_text(image_dir / f"{shot_id}.txt", compose_image_prompt(shot, brief, rules))
-            write_text(flow_dir / f"{shot_id}.txt", compose_flow_prompt(shot, brief, still.name if still else f"{shot_id}.png"))
-        write_text(image_dir / "README.md", asset_index(shots, "stills", "png"))
-        write_text(flow_dir / "README.md", asset_index(shots, "clips", "mp4"))
+            image_prompts[shot_id] = compose_image_prompt(shot, brief, rules)
+            flow_prompts[shot_id] = compose_flow_prompt(shot, brief, still.name if still else f"{shot_id}.png")
+            write_text(image_dir / f"{shot_id}.txt", image_prompts[shot_id])
+            write_text(flow_dir / f"{shot_id}.txt", flow_prompts[shot_id])
+        write_text(image_dir / "README.md", prompt_sheet(shots, image_prompts, "stills", "png", "Prompt ภาพนิ่งทั้งหมด"))
+        write_text(flow_dir / "README.md", prompt_sheet(shots, flow_prompts, "clips", "mp4", "Prompt สำหรับ Google Flow ทั้งหมด"))
 
         tracked = track_shot_assets(job, shots, brief, rules)
         stills_pending = tracked["missing_stills"] + tracked["stale_stills"]
@@ -958,11 +962,18 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     return manifest
 
 
-def asset_index(shots: list, folder: str, suffix: str) -> str:
-    lines = [f"# ไฟล์ที่ต้องได้จากขั้นตอนนี้", ""]
+def prompt_sheet(shots: list, prompts: dict, folder: str, suffix: str, title: str) -> str:
+    """One file with every prompt in order, so a long shot list is one pass of work."""
+    lines = [f"# {title}", "", f"ทั้งหมด {len(shots)} ช็อต ทำตามลำดับแล้ววางไฟล์ใน `{folder}/`", ""]
+    lines.append("## เช็กลิสต์")
+    lines.append("")
     for shot in shots:
-        shot_id = shot.get("id", "")
-        lines.append(f"- `{folder}/{shot_id}.{suffix}` — {shot.get('description', '')}")
+        shot_id = str(shot.get("id", ""))
+        lines.append(f"- [ ] `{folder}/{shot_id}.{suffix}` — {shot.get('description', '')}")
+    lines.append("")
+    for shot in shots:
+        shot_id = str(shot.get("id", ""))
+        lines.extend(["---", "", f"## {shot_id}", "", "```text", prompts.get(shot_id, ""), "```", ""])
     return "\n".join(lines)
 
 

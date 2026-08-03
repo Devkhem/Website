@@ -118,8 +118,8 @@ python3 scripts/run_client_pipeline.py sync <job-id>
 `sync` จะแตก prompt ภาพรายช็อตให้
 
 ```text
-04-image-prompts/sh-01.txt
-04-image-prompts/sh-02.txt
+04-image-prompts/sh-01.txt      ทีละช็อต
+04-image-prompts/README.md      รวมทุกช็อตไว้ในไฟล์เดียว พร้อมเช็กลิสต์
 ```
 
 ถ้า shot list ไม่ได้ใส่ `image_prompt` มา สคริปต์จะประกอบ prompt ให้จาก description + framing + สินค้า
