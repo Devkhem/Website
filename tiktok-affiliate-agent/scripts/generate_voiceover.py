@@ -61,6 +61,19 @@ def text_fingerprint(text: str) -> str:
     return hashlib.sha1(str(text or "").strip().encode("utf-8")).hexdigest()[:12]
 
 
+def voice_fingerprint(voice_id: str, settings: dict) -> str:
+    """Voice and synthesis settings, so switching them retires the old takes."""
+    parts = [
+        f"voice={voice_id}",
+        f"model={settings.get('model_id', 'eleven_multilingual_v2')}",
+        f"stability={settings.get('stability', 0.45)}",
+        f"similarity={settings.get('similarity_boost', 0.75)}",
+        f"style={settings.get('style', 0.0)}",
+        f"format={settings.get('output_format', 'mp3_44100_128')}",
+    ]
+    return text_fingerprint("|".join(parts))
+
+
 def read_render_log(voice_dir: Path) -> dict:
     path = voice_dir / "rendered.json"
     if not path.exists():
@@ -89,12 +102,16 @@ def find_existing_audio(directory: Path, stem: str) -> "Path | None":
     """Any supported recording counts, whatever its case or extension."""
     if not stem or not directory.exists():
         return None
-    for item in sorted(directory.iterdir()):
-        if not item.is_file() or item.stem != stem or item.stat().st_size == 0:
-            continue
-        if item.suffix.lower() in AUDIO_SUFFIXES:
-            return item
-    return None
+    matches = [
+        item
+        for item in directory.iterdir()
+        if item.is_file() and item.stem == stem and item.stat().st_size > 0
+        and item.suffix.lower() in AUDIO_SUFFIXES
+    ]
+    if not matches:
+        return None
+    # Newest wins, same as the pipeline's asset lookup.
+    return max(matches, key=lambda item: (item.stat().st_mtime_ns, item.name))
 
 
 def read_lines(path: Path) -> list:
@@ -180,9 +197,13 @@ def main(argv: "list | None" = None) -> None:
         record_matches = not record.get("file") or (existing is not None and record["file"] == existing.name)
         if record_matches and record.get("stamp") and existing is not None:
             record_matches = record["stamp"] == asset_stamp(existing)
-        stale = bool(record.get("text_sha")) and record_matches and record["text_sha"] != text_fingerprint(text)
+        voice_sha = voice_fingerprint(voice_id, settings)
+        text_changed = bool(record.get("text_sha")) and record["text_sha"] != text_fingerprint(text)
+        voice_changed = bool(record.get("voice_sha")) and record["voice_sha"] != voice_sha
+        stale = record_matches and (text_changed or voice_changed)
         if existing and stale:
-            print(f"[stale] {scene_id} เสียงเดิมอัดจากสคริปต์คนละเวอร์ชัน จะอัดใหม่")
+            reason = "สคริปต์คนละเวอร์ชัน" if text_changed else "เสียงหรือค่า synthesis เปลี่ยนไป"
+            print(f"[stale] {scene_id} เสียงเดิมอัดจาก{reason} จะอัดใหม่")
         elif existing and not args.overwrite:
             print(f"[skip] {scene_id} มีไฟล์อยู่แล้ว: {existing.name}")
             continue
@@ -238,6 +259,7 @@ def main(argv: "list | None" = None) -> None:
         # Recording the text lets `sync` spot audio left over from an edited script.
         render_log[scene_id] = {
             "text_sha": text_fingerprint(text),
+            "voice_sha": voice_fingerprint(voice_id, settings),
             "file": output.name,
             "stamp": asset_stamp(output),
         }

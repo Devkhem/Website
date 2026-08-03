@@ -71,7 +71,8 @@ EPISODES = [
             (16.2, 20.0, "ข้อความสุดท้ายส่งมา", "“ไม่ต้องเปิดแล้ว”"),
             (20.0, 22.0, "“เราเข้ามาแล้ว”", "คืนนี้อย่าหันไปมองกระจก"),
         ],
-        "phone_beats": [3, 4, 5],
+        # Only beat 4 puts the incoming message in `sub`; the others are narration.
+        "phone_beats": [4],
         "phone_context": ("ไม่ทราบชื่อ", "อย่ามองกระจก"),
         "caption": "ผมไม่เห็นใครหน้าห้อง แต่กระจกเห็น ตอนจบคือไม่โอเคเลย",
     },
@@ -384,6 +385,8 @@ def main() -> None:
             continue
         clip_path = videos_dir / f"{episode['id']}-tiktok.mp4"
         encode_clip(frames_dir, audio_path, clip_path)
+        # 660 JPEGs per clip are scratch space once the MP4 exists.
+        shutil.rmtree(frames_dir, ignore_errors=True)
         print(f"{episode['id']}|{clip_path}|{episode['caption']}")
 
 

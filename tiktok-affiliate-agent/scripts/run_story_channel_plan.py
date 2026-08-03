@@ -80,16 +80,29 @@ def select_series(config: dict, requested_id: str) -> dict:
     return series[0] if series else {}
 
 
+def retention_thresholds(config: dict) -> tuple:
+    """kill <= rewrite <= strong, all real percentages, or the run stops."""
+    rules = config.get("retention_rules", {})
+    strong = parse_float(rules.get("strong_continue", {}).get("two_hour_retention_percent"), 35)
+    rewrite = parse_float(rules.get("rewrite_hook", {}).get("two_hour_retention_percent"), 25)
+    kill = parse_float(rules.get("kill_premise", {}).get("two_hour_retention_percent"), 20)
+    for name, value in (("kill_premise", kill), ("rewrite_hook", rewrite), ("strong_continue", strong)):
+        if value is None or not math.isfinite(value) or not 0 <= value <= 100:
+            raise SystemExit(f"retention_rules.{name} ต้องเป็นตัวเลข 0-100 แต่ได้: {value}")
+    if not kill <= rewrite <= strong:
+        raise SystemExit(
+            f"retention_rules ต้องเรียง kill <= rewrite <= strong แต่ได้ {kill:g} / {rewrite:g} / {strong:g}"
+        )
+    return kill, rewrite, strong
+
+
 def decision_from_metrics(config: dict, metrics: list) -> tuple:
     """Return (key, ข้อความอธิบาย) so the plan and the packages agree."""
     if not metrics:
         return "no_data", "ยังไม่มี retention ให้ใช้ premise เดิมและโพสต์ทดสอบ 3 ตอนแรก"
     latest = metrics[-1]
     retention = parse_float(latest.get("retention_percent"))
-    rules = config.get("retention_rules", {})
-    strong = parse_float(rules.get("strong_continue", {}).get("two_hour_retention_percent"), 35)
-    rewrite = parse_float(rules.get("rewrite_hook", {}).get("two_hour_retention_percent"), 25)
-    kill = parse_float(rules.get("kill_premise", {}).get("two_hour_retention_percent"), 20)
+    kill, rewrite, strong = retention_thresholds(config)
     if retention >= strong:
         return "continue", "Retention แข็งแรง: ทำตอนต่อจาก premise เดิมทันที"
     if retention >= rewrite:
@@ -193,10 +206,7 @@ def episode_package(series: dict, episode: dict, posting_time: str, decision_key
 
 def retention_rule_lines(config: dict) -> list:
     """Rules straight from the config that made the decision, not a copy of it."""
-    rules = config.get("retention_rules", {})
-    strong = parse_float(rules.get("strong_continue", {}).get("two_hour_retention_percent"), 35)
-    rewrite = parse_float(rules.get("rewrite_hook", {}).get("two_hour_retention_percent"), 25)
-    kill = parse_float(rules.get("kill_premise", {}).get("two_hour_retention_percent"), 20)
+    kill, rewrite, strong = retention_thresholds(config)
     return [
         f"- retention (วัดที่ 2 ชั่วโมง) ต่ำกว่า {kill:g}% ให้หยุด premise",
         f"- {rewrite:g}% ถึงต่ำกว่า {strong:g}% ให้ใช้ภาพเดิมแต่เปลี่ยน hook",
@@ -352,6 +362,7 @@ def main() -> None:
     args = parse_args()
     args.date = validate_date(args.date)
     config = read_json(Path(args.story))
+    retention_thresholds(config)
     account = read_json(Path(args.account))
     series = select_series(config, args.series_id)
     metrics = read_latest_metrics(Path(args.metrics), series.get("id", ""))

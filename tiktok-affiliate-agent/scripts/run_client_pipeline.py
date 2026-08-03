@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -117,7 +118,7 @@ def normalize_ids(entries: list, prefix: str, extra_keys: list = ()) -> None:
 
 
 REQUIRED_ENTRY_KEYS = {
-    "scenes": ["id", "beat", "vo", "duration_sec"],
+    "scenes": ["id", "beat", "vo", "on_screen_text", "duration_sec"],
     "shots": ["id", "scene_id", "description", "duration_sec"],
 }
 
@@ -223,7 +224,32 @@ def read_render_log(voice_dir: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def voice_is_stale(scene: dict, log: dict, asset: "Path | None") -> bool:
+def load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+def voice_fingerprint(fields_config: dict) -> str:
+    """Same recipe as generate_voiceover, so both agree on what a fresh take is."""
+    settings = fields_config.get("elevenlabs") or {}
+    parts = [
+        f"voice={os.environ.get('ELEVENLABS_VOICE_ID', '').strip()}",
+        f"model={settings.get('model_id', 'eleven_multilingual_v2')}",
+        f"stability={settings.get('stability', 0.45)}",
+        f"similarity={settings.get('similarity_boost', 0.75)}",
+        f"style={settings.get('style', 0.0)}",
+        f"format={settings.get('output_format', 'mp3_44100_128')}",
+    ]
+    return text_fingerprint("|".join(parts))
+
+
+def voice_is_stale(scene: dict, log: dict, asset: "Path | None", voice_sha: str = "") -> bool:
     """True when the recorded audio was synthesized from older script text.
 
     The log entry only applies to the file it names. Audio recorded by hand — or a
@@ -237,6 +263,8 @@ def voice_is_stale(scene: dict, log: dict, asset: "Path | None") -> bool:
     if asset is not None and record.get("stamp") and record["stamp"] != asset_stamp(asset):
         # Same name, different bytes: someone dropped their own take in.
         return False
+    if voice_sha and record.get("voice_sha") and record["voice_sha"] != voice_sha:
+        return True
     return record["text_sha"] != text_fingerprint(scene.get("vo"))
 
 
@@ -985,12 +1013,13 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         write_voice_lines(job, brief, scenes, fields_config)
         voiced = [s for s in scenes if str(s.get("vo") or "").strip()]
         render_log = read_render_log(job.voice_dir)
+        voice_sha = voice_fingerprint(fields_config)
         voice_assets = {str(s.get("id", "")): find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES) for s in voiced}
-        stale_vo = [s for s in voiced if voice_assets[str(s.get("id", ""))] and voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))])]
+        stale_vo = [s for s in voiced if voice_assets[str(s.get("id", ""))] and voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))], voice_sha)]
         missing_vo = [
             s
             for s in voiced
-            if not voice_assets[str(s.get("id", ""))] or voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))])
+            if not voice_assets[str(s.get("id", ""))] or voice_is_stale(s, render_log, voice_assets[str(s.get("id", ""))], voice_sha)
         ]
         stages["voiceover"] = "done" if not missing_vo else "ready"
         if stale_vo:
@@ -1093,7 +1122,7 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
             elif not existing:
                 status = "todo"
             else:
-                status = "stale" if voice_is_stale(scene, render_log, existing) else "done"
+                status = "stale" if voice_is_stale(scene, render_log, existing, voice_fingerprint(fields_config)) else "done"
             writer.writerow(
                 {
                     "scene_id": scene_id,
@@ -1411,6 +1440,7 @@ def parse_args(argv: list) -> argparse.Namespace:
 
 
 def main(argv: "list | None" = None) -> None:
+    load_dotenv(ROOT / ".env")
     args = parse_args(argv if argv is not None else sys.argv[1:])
     args.func(args)
 
