@@ -65,7 +65,7 @@ FINAL_SUFFIXES = [".mp4", ".mov"]
 ASSET_LOG_VERSION = 5
 # Bump when a prompt template changes, so existing jobs adopt the new fingerprint
 # instead of being told their script is stale by a tool update.
-SOURCE_LOG_VERSION = 3
+SOURCE_LOG_VERSION = 4
 
 
 # ---------------------------------------------------------------- utilities
@@ -172,8 +172,13 @@ def warn_once(key: str, message: str) -> None:
 MEDIA_SIGNATURES = {
     "image": [b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"RIFF", b"GIF8"],
     "clip": [b"ftyp", b"\x1a\x45\xdf\xa3", b"RIFF"],
-    "audio": [b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xe3", b"RIFF", b"ftyp", b"OggS"],
+    "audio": [b"ID3", b"RIFF", b"ftyp", b"OggS"],
 }
+
+
+def has_mp3_frame(head: bytes) -> bool:
+    """Any MPEG audio frame starts with 11 set bits, whatever the layer or CRC."""
+    return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
 RAW_AUDIO_SUFFIXES = {".pcm", ".ulaw", ".alaw"}
 MIN_MEDIA_BYTES = 512
 
@@ -278,7 +283,10 @@ def usable_asset(path: "Path | None", kind: str, raw_bps: int = 0) -> bool:
         head = path.open("rb").read(16)
     except OSError:
         return False
-    if not any(signature in head for signature in MEDIA_SIGNATURES.get(kind, [])):
+    known = any(signature in head for signature in MEDIA_SIGNATURES.get(kind, []))
+    if kind == "audio" and not known:
+        known = has_mp3_frame(head)
+    if not known:
         return False
     key = (str(path), asset_stamp(path), kind)
     if key not in _MEDIA_VERDICTS:
@@ -956,14 +964,9 @@ def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str, stamp: 
     fresh paste always clears the flag.
     """
     log = read_source_log(job)
-    stamp = stamp or asset_stamp(derived if derived.exists() else None)
+    stamp = stamp or (content_identity(derived) if derived.exists() else "")
     entry = log.get(key) if isinstance(log.get(key), dict) else {}
-    if entry.get("stamp") != stamp:
-        # The derived file was just rewritten, so it matches its sources by definition.
-        log[key] = {"stamp": stamp, "source_sha": source_sha, "v": SOURCE_LOG_VERSION, "stale": False}
-        write_json(job.path / "source-log.json", log)
-        return False
-    if entry.get("v") != SOURCE_LOG_VERSION:
+    if entry and entry.get("v") != SOURCE_LOG_VERSION:
         # A tool-template change moved the fingerprint, so the old hash cannot be
         # compared. Carry the verdict we already recorded, and for a stale one leave
         # the hash empty so it stays stale until the derived file is rewritten.
@@ -976,6 +979,11 @@ def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str, stamp: 
         }
         write_json(job.path / "source-log.json", log)
         return carried
+    if entry.get("stamp") != stamp:
+        # The derived file was just rewritten, so it matches its sources by definition.
+        log[key] = {"stamp": stamp, "source_sha": source_sha, "v": SOURCE_LOG_VERSION, "stale": False}
+        write_json(job.path / "source-log.json", log)
+        return False
     stale = entry.get("source_sha") != source_sha
     if entry.get("stale") != stale:
         entry["stale"] = stale
@@ -1024,12 +1032,13 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
         ):
             asset = checked_asset(directory, shot_id, suffixes, "image" if kind == "still" else "clip")
             if not asset:
+                # Keep the entry: if the same old bytes come back, they must not be
+                # mistaken for a fresh asset and clear a stale verdict.
                 result["missing_" + kind + "s"].append(shot_id)
-                record.pop(kind, None)
                 continue
             stamp = content_identity(asset)
             entry = record.get(kind) if isinstance(record.get(kind), dict) else {}
-            if entry.get("v") != ASSET_LOG_VERSION and entry.get("sha"):
+            if entry.get("v") == 4 and entry.get("sha"):
                 # Only the stamp representation changed: keep the recorded fingerprint
                 # so a shot whose definition moved stays stale.
                 entry = {"asset": stamp, "sha": entry["sha"], "v": ASSET_LOG_VERSION}

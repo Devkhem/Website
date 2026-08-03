@@ -145,7 +145,7 @@ def content_identity(asset: "Path | None") -> str:
     return f"{asset.name}:{size}:{hashlib.sha1(head + tail).hexdigest()[:16]}"
 
 
-AUDIO_SIGNATURES = [b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xe3", b"RIFF", b"ftyp", b"OggS"]
+AUDIO_SIGNATURES = [b"ID3", b"RIFF", b"ftyp", b"OggS"]
 RAW_AUDIO_SUFFIXES = {".pcm", ".ulaw", ".alaw"}
 MIN_AUDIO_BYTES = 512
 
@@ -174,7 +174,11 @@ def looks_like_audio(path: Path, settings: dict) -> bool:
         head = path.open("rb").read(16)
     except OSError:
         return False
-    if not any(signature in head for signature in AUDIO_SIGNATURES):
+    known = any(signature in head for signature in AUDIO_SIGNATURES)
+    if not known:
+        # Any MPEG audio frame starts with 11 set bits, whatever the layer or CRC.
+        known = len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
+    if not known:
         return False
     probe = shutil.which("ffprobe")
     if not probe:
@@ -185,6 +189,36 @@ def looks_like_audio(path: Path, settings: dict) -> bool:
         capture_output=True, text=True,
     )
     return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def take_duration(path: Path, settings: dict) -> float:
+    if path.suffix.lower() in RAW_AUDIO_SUFFIXES:
+        bps = raw_bytes_per_second(settings)
+        return path.stat().st_size / bps if bps > 0 else 0.0
+    probe = shutil.which("ffprobe")
+    if not probe:
+        return 0.0
+    result = subprocess.run(
+        [probe, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(result.stdout.strip()) if result.returncode == 0 else 0.0
+    except ValueError:
+        return 0.0
+
+
+def take_fits_scene(path: Path, planned: float, settings: dict) -> bool:
+    """Same window the pipeline enforces, so a bad-length take is re-recorded here."""
+    if planned <= 0:
+        return True
+    spoken = take_duration(path, settings)
+    if spoken <= 0:
+        return True
+    if spoken - planned > max(1.0, planned * 0.2):
+        return False
+    return spoken >= max(1.0, planned * 0.4)
 
 
 def sibling_takes(directory: Path, stem: str) -> list:
@@ -290,7 +324,11 @@ def main(argv: "list | None" = None) -> None:
             print(f"[block] {scene_id} มีไฟล์เสียงซ้ำ: {', '.join(sorted(item.name for item in takes))} ให้เหลือไฟล์เดียวก่อน")
             blocked += 1
             continue
+        planned = float(str(row.get("duration_sec") or 0) or 0) if str(row.get("duration_sec") or "").replace(".", "", 1).isdigit() else 0.0
         existing = takes[0] if takes and looks_like_audio(takes[0], settings) else None
+        if existing and not take_fits_scene(existing, planned, settings):
+            print(f"[stale] {scene_id} เสียงเดิมยาวไม่พอดีกับซีน จะอัดใหม่")
+            existing = None
         record = render_log.get(scene_id) if isinstance(render_log.get(scene_id), dict) else {}
         # A manual take is not ours to call stale, even when it kept our filename.
         record_matches = not record.get("file") or (existing is not None and record["file"] == existing.name)
