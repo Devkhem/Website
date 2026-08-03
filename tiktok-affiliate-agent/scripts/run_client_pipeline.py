@@ -17,6 +17,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import re
 import sys
 import urllib.request
@@ -54,7 +55,9 @@ STAGE_LABELS = {
 
 IMAGE_SUFFIXES = [".png", ".jpg", ".jpeg", ".webp"]
 CLIP_SUFFIXES = [".mp4", ".mov", ".webm"]
-AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw"]
+AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
+# ElevenLabs output_format prefix -> the extension its bytes actually deserve.
+AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 FINAL_SUFFIXES = [".mp4", ".mov"]
 
 
@@ -123,9 +126,9 @@ def entries_are_valid(entries: list, key: str, name: str) -> bool:
             print(f"[warn] {name} มี id ซ้ำใน `{key}`: `{entry_id}` ต้องไม่ซ้ำเพราะใช้เป็นชื่อไฟล์")
             ok = False
         seen.add(entry_id)
-        duration = entry.get("duration_sec")
-        if duration is not None and str(duration).strip() != "" and as_float(duration, None) is None:
-            print(f"[warn] {name} `{entry_id}` มี duration_sec ที่ไม่ใช่ตัวเลข: {duration!r}")
+        duration = as_float(entry.get("duration_sec"), None)
+        if duration is None or not math.isfinite(duration) or duration <= 0:
+            print(f"[warn] {name} `{entry_id}` ต้องมี duration_sec เป็นตัวเลขบวก แต่ได้: {entry.get('duration_sec')!r}")
             ok = False
     return ok
 
@@ -704,11 +707,23 @@ def newest_input_mtime(job: Job) -> float:
 def audio_extension(fields_config: dict) -> str:
     """File extension that matches what ElevenLabs will actually return."""
     fmt = str((fields_config.get("elevenlabs") or {}).get("output_format", "mp3_44100_128")).lower()
-    if fmt.startswith("pcm") or fmt.startswith("wav"):
-        return ".wav"
-    if fmt.startswith("ulaw") or fmt.startswith("mulaw"):
-        return ".ulaw"
-    return ".mp3"
+    suffix = AUDIO_FORMAT_SUFFIXES.get(fmt.split("_")[0])
+    if not suffix:
+        print(f"[warn] ไม่รู้จัก output_format `{fmt}` ตั้งชื่อไฟล์เป็น .mp3 ไปก่อน")
+        return ".mp3"
+    return suffix
+
+
+def script_duration_problem(brief: dict, script: dict) -> str:
+    """The delivered runtime has to match what the client asked for."""
+    target = as_float(brief.get("duration_sec"), 0)
+    if not target:
+        return ""
+    total = sum(as_float(scene.get("duration_sec"), 0) for scene in script.get("scenes", []))
+    tolerance = max(2.0, target * 0.05)
+    if abs(total - target) <= tolerance:
+        return ""
+    return f"เวลารวมของสคริปต์ {total:g} วินาที ไม่ตรงกับ brief {target:g} วินาที (คลาดได้ {tolerance:g} วินาที)"
 
 
 def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
@@ -738,7 +753,10 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     write_text(job.path / "02-script-prompt.md", script_prompt(brief, brand_bible))
     script = job.load_stage_json(job.script_path, "scenes")
     if script:
-        stages["script"] = "done"
+        runtime_problem = script_duration_problem(brief, script)
+        stages["script"] = "ready" if runtime_problem else "done"
+        if runtime_problem:
+            actions.append(f"แก้ `script.json` หรือปรับ duration_sec ใน `brief.json`: {runtime_problem}")
     else:
         stages["script"] = "ready" if stages["brand_bible"] == "done" else "waiting"
         if stages["script"] == "ready":
@@ -828,7 +846,10 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
         if final_file and len(exports) > 1:
             print(f"[note] มีไฟล์ใน final/ {len(exports)} ไฟล์ ใช้ไฟล์ล่าสุด: {final_file.name}")
         ready_to_cut = (
-            stages["shot_list"] == "done" and stages["animate"] == "done" and stages["voiceover"] == "done"
+            stages["script"] == "done"
+            and stages["shot_list"] == "done"
+            and stages["animate"] == "done"
+            and stages["voiceover"] == "done"
         )
         stale_export = bool(final_file) and final_file.stat().st_mtime < newest_input_mtime(job)
         if final_file and ready_to_cut and not stale_export:
@@ -922,7 +943,12 @@ def write_assembly_sheet(job: Job, script: dict, shots: list) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        for index, shot in enumerate(shots, start=1):
+        scene_order = {str(scene.get("id")): position for position, scene in enumerate(script.get("scenes", []))}
+        ordered = sorted(
+            enumerate(shots),
+            key=lambda pair: (scene_order.get(str(pair[1].get("scene_id") or ""), len(scene_order)), pair[0]),
+        )
+        for index, (_, shot) in enumerate(ordered, start=1):
             shot_id = str(shot.get("id") or "")
             scene_id = str(shot.get("scene_id") or "")
             scene = scenes.get(scene_id, {})
@@ -939,7 +965,8 @@ def write_assembly_sheet(job: Job, script: dict, shots: list) -> None:
                     "duration_sec": shot.get("duration_sec", ""),
                     "still_file": f"stills/{still.name}" if still else "MISSING",
                     "clip_file": f"clips/{clip.name}" if clip else "MISSING",
-                    "voice_file": f"voiceover/{voice.name}" if voice else ("no-vo" if silent else "MISSING"),
+                    # A cleared `vo` wins over any audio left behind by an earlier take.
+                    "voice_file": "no-vo" if silent else (f"voiceover/{voice.name}" if voice else "MISSING"),
                     "on_screen_text": str(scene.get("on_screen_text") or "").replace("\n", " "),
                     "camera_move": shot.get("camera_move", ""),
                 }

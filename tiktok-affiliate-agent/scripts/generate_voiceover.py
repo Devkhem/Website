@@ -41,17 +41,20 @@ def resolve_job(jobs_root: str, job_id: str) -> Path:
     raise SystemExit(f"ไม่พบงาน: {job_id}")
 
 
-AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw"]
+AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
+AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 
 
 def audio_extension(settings: dict) -> str:
-    """Never name a file .wav when the API is about to hand back MP3 bytes."""
+    """Name the file after what the API will actually return, or refuse to spend credits."""
     fmt = str(settings.get("output_format", "mp3_44100_128")).lower()
-    if fmt.startswith("pcm") or fmt.startswith("wav"):
-        return ".wav"
-    if fmt.startswith("ulaw") or fmt.startswith("mulaw"):
-        return ".ulaw"
-    return ".mp3"
+    suffix = AUDIO_FORMAT_SUFFIXES.get(fmt.split("_")[0])
+    if not suffix:
+        raise SystemExit(
+            f"ไม่รองรับ output_format `{fmt}` ใน data/client_intake_fields.json "
+            f"ที่รองรับคือ {', '.join(sorted(AUDIO_FORMAT_SUFFIXES))}"
+        )
+    return suffix
 
 
 def text_fingerprint(text: str) -> str:
