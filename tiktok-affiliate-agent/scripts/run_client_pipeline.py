@@ -674,29 +674,45 @@ def script_scene_fingerprint(script: dict) -> str:
     return text_fingerprint("\n".join(rows))
 
 
-def shot_list_is_stale(job: Job, script: dict) -> bool:
-    """True when the script changed after this shot list was written.
-
-    The shot list's visual descriptions come from the script text, so editing a
-    scene's narration invalidates the shots even if ids and durations still line up.
-    """
+def read_source_log(job: Job) -> dict:
     log_path = job.path / "source-log.json"
-    log = {}
-    if log_path.exists():
-        try:
-            loaded = read_json(log_path)
-            log = loaded if isinstance(loaded, dict) else {}
-        except json.JSONDecodeError:
-            log = {}
-    stamp = asset_stamp(job.shot_list_path if job.shot_list_path.exists() else None)
-    fingerprint = script_scene_fingerprint(script)
-    entry = log.get("shot_list") if isinstance(log.get("shot_list"), dict) else {}
-    if entry.get("stamp") != stamp:
-        # The shot list was just written, so it matches whatever the script says now.
-        log["shot_list"] = {"stamp": stamp, "script_sha": fingerprint}
-        write_json(log_path, log)
+    if not log_path.exists():
+        return {}
+    try:
+        loaded = read_json(log_path)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str) -> bool:
+    """True when the sources changed after `derived` was last written.
+
+    Rewriting the derived file adopts whatever the sources say at that moment, so a
+    fresh paste always clears the flag.
+    """
+    log = read_source_log(job)
+    stamp = asset_stamp(derived if derived.exists() else None)
+    entry = log.get(key) if isinstance(log.get(key), dict) else {}
+    if entry.get("stamp") != stamp or not entry.get("source_sha"):
+        # New file, or a record written before this log format: adopt what is on disk.
+        log[key] = {"stamp": stamp, "source_sha": source_sha}
+        write_json(job.path / "source-log.json", log)
         return False
-    return entry.get("script_sha") != fingerprint
+    return entry["source_sha"] != source_sha
+
+
+def script_source_fingerprint(brief: dict, brand_bible: str) -> str:
+    """What the script was written from: the client's brief plus the Brand Bible."""
+    fields = [
+        "client_name", "product", "goal", "audience", "tone", "platform", "aspect_ratio",
+        "duration_sec", "scene_count", "must_include", "avoid", "reference", "notes",
+        "assets_link", "subtitles", "language",
+    ]
+    parts = [f"{field}={brief.get(field, '')}" for field in fields]
+    parts.append(f"form_extra={json.dumps(brief.get('form_extra') or {}, ensure_ascii=False, sort_keys=True)}")
+    parts.append(f"brand_bible={brand_bible.strip()}")
+    return text_fingerprint("\n".join(parts))
 
 
 def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
@@ -814,9 +830,12 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     script = job.load_stage_json(job.script_path, "scenes")
     if script:
         runtime_problem = script_duration_problem(brief, script)
-        stages["script"] = "ready" if runtime_problem else "done"
+        script_stale = derived_is_stale(job, "script", job.script_path, script_source_fingerprint(brief, brand_bible))
+        stages["script"] = "ready" if (runtime_problem or script_stale) else "done"
         if runtime_problem:
             actions.append(f"แก้ `script.json` หรือปรับ duration_sec ใน `brief.json`: {runtime_problem}")
+        if script_stale:
+            actions.append("brief หรือ brand bible ถูกแก้หลังเขียนสคริปต์ ให้รัน prompt ใน `02-script-prompt.md` ใหม่")
     else:
         stages["script"] = "ready" if stages["brand_bible"] == "done" else "waiting"
         if stages["script"] == "ready":
@@ -829,7 +848,7 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     shots = shot_list.get("shots", []) if shot_list else []
     script_ok = stages["script"] == "done"
     problems = shot_list_problems(script, shots)
-    if shots and script_ok and shot_list_is_stale(job, script):
+    if shots and script_ok and derived_is_stale(job, "shot_list", job.shot_list_path, script_scene_fingerprint(script)):
         problems.append("สคริปต์ถูกแก้หลังจากสร้าง shot list ต้องรัน prompt 03 ใหม่")
     if shots and script_ok and not problems:
         stages["shot_list"] = "done"
@@ -1164,6 +1183,21 @@ def archive_derived(job: Job) -> list:
     return moved
 
 
+def resolve_new_job_path(jobs_root: str, job_id: str) -> Path:
+    """A job id names one folder inside the jobs root — never a path elsewhere.
+
+    `--force` archives everything in the target folder, so a stray `..` or absolute
+    path could rearrange an unrelated directory.
+    """
+    if job_id != Path(job_id).name or job_id in {"", ".", ".."}:
+        raise SystemExit(f"--job-id ต้องเป็นชื่อโฟลเดอร์เดียว ห้ามมี / หรือ .. : {job_id}")
+    root = Path(jobs_root).expanduser().resolve()
+    candidate = (root / job_id).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise SystemExit(f"--job-id ต้องอยู่ใต้ {root}")
+    return candidate
+
+
 def cmd_new(args: argparse.Namespace) -> None:
     fields_config = read_json(Path(args.fields))
     defaults = fields_config.get("defaults", {})
@@ -1182,7 +1216,7 @@ def cmd_new(args: argparse.Namespace) -> None:
 
     brief = build_brief(mapped, defaults, overrides)
     job_id = args.job_id or f"{args.date}-{slugify(str(brief.get('client_name', '')))}"
-    job_path = Path(args.jobs) / job_id
+    job_path = resolve_new_job_path(args.jobs, job_id)
     if job_path.exists() and not args.force:
         raise SystemExit(f"มีงานนี้อยู่แล้ว: {job_path} (ใช้ --force เพื่อรับ brief ใหม่ ของเดิมจะถูกย้ายเข้า archive)")
     job_path.mkdir(parents=True, exist_ok=True)

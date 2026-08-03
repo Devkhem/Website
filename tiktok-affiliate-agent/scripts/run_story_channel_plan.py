@@ -255,7 +255,11 @@ def write_queue(path: Path, packages: list[dict[str, str]]) -> None:
             writer.writerow({field: package[field] for field in fields})
 
 
-def write_episode_packages(output_dir: Path, packages: list[dict[str, str]]) -> None:
+def write_episode_packages(output_dir: Path, packages: list) -> None:
+    # A rerun can select different episodes, so clear the previous ones first;
+    # otherwise a killed premise leaves packages that still look actionable.
+    for stale in sorted(output_dir.glob("episode-*-package.md")):
+        stale.unlink()
     for package in packages:
         path = output_dir / f"episode-{int(package['episode']):02d}-package.md"
         path.write_text(render_episode_package(package), encoding="utf-8")

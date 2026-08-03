@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import math
+import shutil
+import subprocess
 import wave
 import struct
 import random
@@ -35,7 +37,7 @@ EPISODES = [
             (2.6, 6.4, "คืนนั้นผมนอน\nห้อง 407 คนเดียว", "ทั้งชั้นเงียบผิดปกติ"),
             (6.4, 10.8, "ก๊อก... ก๊อก... ก๊อก...", "เสียงมาจากหน้าประตู"),
             (10.8, 15.8, "ผมเปิดตาแมว", "หน้าห้องไม่มีใคร"),
-            (15.8, 20.8, "แต่โทรศัพท์เด้งขึ้นมา", "“เปิดหน่อย หนาวมาก”"),
+            (15.8, 20.0, "แต่โทรศัพท์เด้งขึ้นมา", "“เปิดหน่อย หนาวมาก”"),
             (20.0, 22.0, "ถ้าเป็นคุณ", "จะเปิดไหม?"),
         ],
         "caption": "อย่าเปิดประตูหลังตี 3 ฟังให้จบแล้วบอกทีว่าคุณจะเปิดไหม",
@@ -48,7 +50,7 @@ EPISODES = [
             (2.6, 6.8, "ข้อความแรกเขียนว่า", "“คุณอยู่คนเดียวใช่ไหม”"),
             (6.8, 11.2, "ผมจำเบอร์นั้นได้", "รูมเมตที่ย้ายออกไปเมื่อปีก่อน"),
             (11.2, 16.4, "ข้อความต่อมา", "“อย่ามองตาแมว”"),
-            (16.4, 20.6, "แต่ผมมองไปแล้ว", "ในเงาประตูมีคนยืนอยู่"),
+            (16.4, 20.0, "แต่ผมมองไปแล้ว", "ในเงาประตูมีคนยืนอยู่"),
             (20.0, 22.0, "แล้วแชตสุดท้ายก็ขึ้น", "“เขาเห็นคุณแล้ว”"),
         ],
         "caption": "เบอร์ที่ปิดไปแล้ว ส่งข้อความมา ถ้าเจอแบบนี้คุณจะทำยังไง",
@@ -61,7 +63,7 @@ EPISODES = [
             (2.8, 7.0, "ปลายทางเดินมีเงา", "ยืนนิ่งอยู่ในกรอบกระจก"),
             (7.0, 11.4, "ผมหันกลับไปดู", "ทางเดินว่างเปล่า"),
             (11.4, 16.2, "แต่ในจอมือถือ", "เงานั้นใกล้กว่าเดิม"),
-            (16.2, 20.8, "ข้อความสุดท้ายส่งมา", "“ไม่ต้องเปิดแล้ว”"),
+            (16.2, 20.0, "ข้อความสุดท้ายส่งมา", "“ไม่ต้องเปิดแล้ว”"),
             (20.0, 22.0, "“เราเข้ามาแล้ว”", "คืนนี้อย่าหันไปมองกระจก"),
         ],
         "caption": "ผมไม่เห็นใครหน้าห้อง แต่กระจกเห็น ตอนจบคือไม่โอเคเลย",
@@ -69,26 +71,70 @@ EPISODES = [
 ]
 
 
-def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = [
-        "/System/Library/Fonts/Supplemental/Thonburi.ttc",
-        "/System/Library/Fonts/ThonburiUI.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-    ]
-    for item in candidates:
-        p = Path(item)
-        if p.exists():
-            return ImageFont.truetype(str(p), size=size, index=1 if bold and item.endswith(".ttc") else 0)
-    return ImageFont.load_default()
+FONT_CANDIDATES = [
+    # macOS
+    "/System/Library/Fonts/Supplemental/Thonburi.ttc",
+    "/System/Library/Fonts/ThonburiUI.ttc",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    # Linux
+    "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansThai-Regular.ttf",
+    "/usr/share/fonts/truetype/tlwg/Sarabun-Regular.ttf",
+    "/usr/share/fonts/truetype/tlwg/Loma.ttf",
+    "/usr/share/fonts/truetype/tlwg/Garuda.ttf",
+    # Windows
+    "C:/Windows/Fonts/leelawui.ttf",
+    "C:/Windows/Fonts/leelawad.ttf",
+    "C:/Windows/Fonts/tahoma.ttf",
+]
+
+FONT_HELP = (
+    "renderer ต้องใช้ฟอนต์ที่รองรับภาษาไทย\n"
+    "macOS: มีมากับเครื่องอยู่แล้ว\n"
+    "Ubuntu/Debian: sudo apt install fonts-thai-tlwg หรือ fonts-noto-core\n"
+    "Windows: ใช้ Leelawadee UI ที่มีมากับ Windows\n"
+    "หรือชี้ไฟล์ฟอนต์เองด้วย --font /path/to/font.ttf"
+)
+
+_FONT_PATH = ""
+F22 = F26 = F30 = F38 = F48 = F60 = None
 
 
-F22 = font(22)
-F26 = font(26)
-F30 = font(30)
-F38 = font(38, True)
-F48 = font(48, True)
-F60 = font(60, True)
+def find_thai_font(explicit: str = "") -> str:
+    """A font that can actually draw Thai, or nothing."""
+    if explicit:
+        if not Path(explicit).exists():
+            raise SystemExit(f"ไม่พบไฟล์ฟอนต์: {explicit}")
+        return explicit
+    for item in FONT_CANDIDATES:
+        if Path(item).exists():
+            return item
+    matcher = shutil.which("fc-match")
+    if matcher:
+        try:
+            found = subprocess.run(
+                [matcher, "-f", "%{file}", ":lang=th"], capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            found = ""
+        if found and Path(found).exists():
+            return found
+    return ""
+
+
+def font(size: int, bold: bool = False):
+    path = _FONT_PATH
+    return ImageFont.truetype(path, size=size, index=1 if bold and path.endswith(".ttc") else 0)
+
+
+def load_fonts(explicit: str = "") -> None:
+    global _FONT_PATH, F22, F26, F30, F38, F48, F60
+    _FONT_PATH = find_thai_font(explicit)
+    if not _FONT_PATH:
+        raise SystemExit(FONT_HELP)
+    F22, F26, F30 = font(22), font(26), font(30)
+    F38, F48, F60 = font(38, True), font(48, True), font(60, True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,7 +145,31 @@ def parse_args() -> argparse.Namespace:
         help="Input key visual.",
     )
     parser.add_argument("--out", default=str(ROOT / "outputs" / "2026-05-14"), help="Output date directory.")
+    parser.add_argument("--font", default="", help="ไฟล์ฟอนต์ภาษาไทยที่จะใช้ ถ้าไม่ใส่จะหาให้เอง.")
+    parser.add_argument("--frames-only", action="store_true", help="สร้างเฉพาะเฟรมกับเสียง ไม่ encode เป็น MP4.")
     return parser.parse_args()
+
+
+def encode_clip(frames_dir: Path, audio_path: Path, output_path: Path) -> None:
+    """Mux the frames and the ambient bed into a TikTok-ready MP4."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SystemExit(
+            "ต้องมี ffmpeg เพื่อรวมเฟรมเป็น MP4\n"
+            "macOS: brew install ffmpeg | Ubuntu: sudo apt install ffmpeg\n"
+            "ถ้าอยากได้เฉพาะเฟรมไว้ไปตัดต่อเอง ให้ใส่ --frames-only"
+        )
+    command = [
+        ffmpeg, "-y", "-loglevel", "error",
+        "-framerate", str(FPS), "-i", str(frames_dir / "frame_%04d.jpg"),
+        "-i", str(audio_path),
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart",
+        str(output_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f"ffmpeg ล้มเหลว:\n{result.stderr.strip()[-800:]}")
 
 
 def ease(t: float) -> float:
@@ -253,6 +323,7 @@ def render_episode(bg: Image.Image, episode: dict, episode_index: int, out_dir: 
 
 def main() -> None:
     args = parse_args()
+    load_fonts(args.font)
     out_dir = Path(args.out)
     videos_dir = out_dir / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
@@ -261,7 +332,12 @@ def main() -> None:
     write_audio(audio_path, CLIP_DURATION)
     for index, episode in enumerate(EPISODES):
         frames_dir = render_episode(bg, episode, index, videos_dir)
-        print(f"{episode['id']}|{frames_dir}|{audio_path}|{episode['caption']}")
+        if args.frames_only:
+            print(f"{episode['id']}|{frames_dir}|{audio_path}|{episode['caption']}")
+            continue
+        clip_path = videos_dir / f"{episode['id']}-tiktok.mp4"
+        encode_clip(frames_dir, audio_path, clip_path)
+        print(f"{episode['id']}|{clip_path}|{episode['caption']}")
 
 
 if __name__ == "__main__":
