@@ -89,6 +89,7 @@ outputs/YYYY-MM-DD/<series-id>-keyvisual.png
 ถ้าเป็น template `room-407` ให้ใช้:
 
 ```bash
+python3 -m pip install -r requirements.txt   # ครั้งแรกครั้งเดียว renderer ต้องใช้ Pillow
 python3 scripts/render_story_triplet_from_image.py \
   --image outputs/YYYY-MM-DD/<series-id>-keyvisual.png \
   --out outputs/YYYY-MM-DD

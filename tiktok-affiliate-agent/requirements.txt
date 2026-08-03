@@ -1,0 +1,5 @@
+# ติดตั้งเฉพาะตอนจะใช้สคริปต์ที่ทำงานกับรูปหรือวิดีโอ
+# scripts/prepare_api_image.py และ scripts/render_story_triplet_from_image.py ต้องใช้ Pillow
+# สคริปต์วางแผนทั้งหมด (run_daily_plan, run_story_channel_plan, run_client_pipeline,
+# generate_voiceover) ใช้ไลบรารีมาตรฐานของ Python ล้วน ไม่ต้องติดตั้งอะไรเพิ่ม
+Pillow>=10.0

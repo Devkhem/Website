@@ -1,1 +1,1 @@
-date,series_id,episode,clip_id,posting_time,views,avg_watch_time_seconds,retention_percent,likes,comments,shares,saves,profile_visits,notes,next_action
+date,series_id,episode,clip_id,posting_time,measured_after_hours,views,avg_watch_time_seconds,retention_percent,likes,comments,shares,saves,profile_visits,notes,next_action

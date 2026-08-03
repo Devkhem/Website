@@ -29,12 +29,23 @@ def read_json(path: Path) -> dict:
         return json.load(handle)
 
 
-def read_latest_metrics(path: Path, series_id: str) -> list[dict[str, str]]:
+def read_latest_metrics(path: Path, series_id: str) -> list:
+    """Rows for this series that carry a retention number.
+
+    The rules are written in terms of two-hour retention, so prefer rows measured at
+    two hours; older files without the column fall back to every row.
+    """
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    return [row for row in rows if row.get("series_id") == series_id and row.get("retention_percent")]
+    rows = [row for row in rows if row.get("series_id") == series_id and row.get("retention_percent")]
+    two_hour = [row for row in rows if str(row.get("measured_after_hours") or "").strip() == "2"]
+    if two_hour:
+        return two_hour
+    if rows and any("measured_after_hours" in row for row in rows):
+        print("[warn] ยังไม่มีแถวที่วัดที่ 2 ชั่วโมง ใช้แถวล่าสุดแทน ค่าที่ได้อาจไม่ตรงกับเกณฑ์")
+    return rows
 
 
 def select_series(config: dict, requested_id: str) -> dict:
@@ -47,9 +58,10 @@ def select_series(config: dict, requested_id: str) -> dict:
     return series[0] if series else {}
 
 
-def decision_from_metrics(config: dict, metrics: list[dict[str, str]]) -> str:
+def decision_from_metrics(config: dict, metrics: list) -> tuple:
+    """Return (key, ข้อความอธิบาย) so the plan and the packages agree."""
     if not metrics:
-        return "ยังไม่มี retention ให้ใช้ premise เดิมและโพสต์ทดสอบ 3 ตอนแรก"
+        return "no_data", "ยังไม่มี retention ให้ใช้ premise เดิมและโพสต์ทดสอบ 3 ตอนแรก"
     latest = metrics[-1]
     retention = parse_float(latest.get("retention_percent"))
     rules = config.get("retention_rules", {})
@@ -57,12 +69,35 @@ def decision_from_metrics(config: dict, metrics: list[dict[str, str]]) -> str:
     rewrite = parse_float(rules.get("rewrite_hook", {}).get("two_hour_retention_percent"), 25)
     kill = parse_float(rules.get("kill_premise", {}).get("two_hour_retention_percent"), 20)
     if retention >= strong:
-        return "Retention แข็งแรง: ทำตอนต่อจาก premise เดิมทันที"
+        return "continue", "Retention แข็งแรง: ทำตอนต่อจาก premise เดิมทันที"
     if retention >= rewrite:
-        return "Retention กลาง: ใช้ภาพเดิมได้ แต่ต้องเปลี่ยน hook 3 วินาทีแรก"
+        return "rewrite_hook", "Retention กลาง: ใช้ภาพเดิมได้ แต่ต้องเปลี่ยน hook 3 วินาทีแรก"
     if retention < kill:
-        return "Retention ต่ำ: หยุด premise นี้และเปลี่ยน location/premise"
-    return "Retention ยังพอทดสอบได้: ทำอีก 1 variation ก่อนตัดสินใจ"
+        return "kill", "Retention ต่ำ: หยุด premise นี้และเปลี่ยน location/premise"
+    return "test_more", "Retention ยังพอทดสอบได้: ทำอีก 1 variation ก่อนตัดสินใจ"
+
+
+def posted_episodes(metrics: list) -> set:
+    numbers = set()
+    for row in metrics:
+        try:
+            numbers.add(int(str(row.get("episode") or "").strip()))
+        except ValueError:
+            continue
+    return numbers
+
+
+def select_episodes(series: dict, decision_key: str, posted: set) -> list:
+    """Turn the retention decision into the episodes this run should package."""
+    episodes = series.get("episodes", [])
+    if decision_key == "kill":
+        return []
+    if decision_key == "rewrite_hook":
+        # Same episodes, new hooks. Re-package what was posted, or the first three.
+        redo = [item for item in episodes if int(item.get("episode", 0)) in posted]
+        return (redo or episodes)[:3]
+    fresh = [item for item in episodes if int(item.get("episode", 0)) not in posted]
+    return (fresh or episodes)[:3]
 
 
 def parse_float(value, default: float = 0) -> float:
@@ -86,7 +121,7 @@ def build_image_prompt(series: dict) -> str:
     )
 
 
-def episode_package(series: dict, episode: dict, posting_time: str) -> dict[str, str]:
+def episode_package(series: dict, episode: dict, posting_time: str, decision_key: str = "no_data") -> dict:
     title = episode.get("title", "")
     hook = episode.get("hook", "")
     twist = episode.get("twist", "")
@@ -103,7 +138,8 @@ def episode_package(series: dict, episode: dict, posting_time: str) -> dict[str,
         ]
     )
     edit_notes = "\n".join(
-        [
+        (["ต้องเขียน hook 3 วินาทีแรกใหม่ ห้ามใช้ hook เดิมซ้ำ"] if decision_key == "rewrite_hook" else [])
+        + [
             "ใช้ภาพแม่ภาพเดียว",
             "เริ่มด้วย crop ใกล้จุดผิดปกติ แล้วค่อย zoom out",
             "ใส่ subtitle สั้น ไม่เกิน 2 บรรทัดต่อ beat",
@@ -127,10 +163,10 @@ def episode_package(series: dict, episode: dict, posting_time: str) -> dict[str,
     }
 
 
-def render_markdown(account: dict, config: dict, series: dict, packages: list[dict[str, str]], decision: str) -> str:
+def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str) -> str:
     handle = account.get("handle", "@thatslife6969")
     lines = [
-        f"# Story Channel Plan: {date.today().isoformat()}",
+        f"# Story Channel Plan: {plan_date}",
         "",
         f"TikTok account: {handle}",
         f"Workflow: {config.get('primary_format', 'ChatGPT image -> Codex 3 clips')}",
@@ -151,6 +187,16 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list[di
         "- ถ้า retention 35% ขึ้นไป ให้ทำตอนต่อทันที",
         "",
     ]
+    if not packages:
+        lines.extend(
+            [
+                "## หยุด premise นี้",
+                "",
+                "retention ต่ำกว่าเกณฑ์ kill จึงไม่ออก episode package ให้รอบนี้",
+                "ให้เลือก series อื่นด้วย --series-id หรือเพิ่ม premise ใหม่ใน data/story_series.json",
+                "",
+            ]
+        )
     for package in packages:
         lines.extend(
             [
@@ -253,21 +299,32 @@ def main() -> None:
     account = read_json(Path(args.account))
     series = select_series(config, args.series_id)
     metrics = read_latest_metrics(Path(args.metrics), series.get("id", ""))
-    decision = decision_from_metrics(config, metrics)
+    decision_key, decision = decision_from_metrics(config, metrics)
     posting_windows = config.get("posting_windows") or ["12:00", "18:30", "22:30"]
-    episodes = series.get("episodes", [])[:3]
-    packages = [episode_package(series, episode, posting_windows[index % len(posting_windows)]) for index, episode in enumerate(episodes)]
+    posted = posted_episodes(metrics)
+    episodes = select_episodes(series, decision_key, posted)
+    packages = [
+        episode_package(series, episode, posting_windows[index % len(posting_windows)], decision_key)
+        for index, episode in enumerate(episodes)
+    ]
 
     output_dir = Path(args.out) / args.date
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "chatgpt-image-prompt.txt").write_text(build_image_prompt(series), encoding="utf-8")
-    (output_dir / "story-channel-plan.md").write_text(render_markdown(account, config, series, packages, decision), encoding="utf-8")
+    (output_dir / "story-channel-plan.md").write_text(
+        render_markdown(account, config, series, packages, decision, args.date), encoding="utf-8"
+    )
     write_queue(output_dir / "story_posting_queue.csv", packages)
     write_episode_packages(output_dir, packages)
 
     print(f"Created {output_dir / 'chatgpt-image-prompt.txt'}")
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
+    print(f"Decision: {decision}")
+    if not packages:
+        print("ไม่ได้สร้าง episode package เพราะ retention ต่ำกว่าเกณฑ์ kill")
+    elif posted:
+        print(f"ตอนที่โพสต์ไปแล้ว: {', '.join(str(number) for number in sorted(posted))}")
 
 
 if __name__ == "__main__":

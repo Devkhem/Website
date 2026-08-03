@@ -67,7 +67,8 @@ outputs/<วันที่>/episode-02-package.md
 outputs/<วันที่>/episode-03-package.md
 ```
 
-หลังโพสต์ ให้กรอกผลใน:
+หลังโพสต์ ให้กรอกผลใน (คอลัมน์ `measured_after_hours` ใส่ 2 หรือ 24 ตามรอบที่วัด
+เกณฑ์ตัดสินใช้แถวที่วัดตอน 2 ชั่วโมง):
 
 ```text
 data/story_metrics.csv
@@ -86,6 +87,16 @@ python3 scripts/prepare_api_image.py outputs/<วันที่>/room-407-chatg
 - Retention >= 35%: ทำตอนต่อจาก premise เดิม
 - Retention 25-34%: ใช้ภาพเดิม แต่เปลี่ยน hook
 - Retention < 20%: เปลี่ยน premise/location
+
+## การติดตั้ง
+
+สคริปต์วางแผนทุกตัวใช้ Python มาตรฐาน รันได้เลยไม่ต้องติดตั้งอะไร
+เฉพาะสคริปต์ที่ทำงานกับรูปหรือวิดีโอ (`prepare_api_image.py`, `render_story_triplet_from_image.py`)
+ต้องใช้ Pillow
+
+```bash
+python3 -m pip install -r requirements.txt
+```
 
 ## สิ่งที่ Agent ทำ
 
@@ -152,7 +163,10 @@ data/
   revenue_targets.json     เป้ารายได้และ scenario คอมมิชชัน
   client_intake_fields.json map คำถาม Google Form และค่า ElevenLabs
   sample_form_responses.csv ตัวอย่างคำตอบฟอร์มไว้ลองรัน
+  story_series.json        premise และ episode ของช่องเรื่องเล่า
+  story_metrics.csv        ผล retention ของแต่ละตอน
 docs/
+  daily-story-ops-workflow.md ขั้นตอนรายวันของช่องเรื่องเล่า
   client-video-pipeline.md งานลูกค้าตั้งแต่ Google Form ถึงส่ง Review
   tiktok-account-connection.md วิธีเชื่อมบัญชี TikTok และข้อจำกัดการโพสต์จริง
   tiktok-developer-setup.md ขั้นตอนตั้งค่า TikTok Developer app
@@ -160,6 +174,7 @@ docs/
   agent-contract.md        สัญญาการทำงานของ Agent
   implementation-options.md วิธีต่อยอดเป็นระบบจริง
   weekly-30000-target-plan.md แผนไปให้ถึงคอมมิชชัน 30,000 บาทต่อสัปดาห์
+requirements.txt           Pillow สำหรับสคริปต์ที่ทำงานกับรูป/วิดีโอ
 prompts/
   content_idea_agent.md    Prompt สำหรับคิดไอเดีย
   script_agent.md          Prompt สำหรับเขียนสคริปต์
@@ -168,11 +183,15 @@ prompts/
   analytics_agent.md       Prompt สำหรับวิเคราะห์ผล
 scripts/
   run_daily_plan.py        สคริปต์สร้างแผนคอนเทนต์รายวัน
+  run_story_channel_plan.py แผนช่องเรื่องเล่า 1 ภาพ 3 ตอน
   run_client_pipeline.py   คุม pipeline งานลูกค้าทั้งเส้น
   generate_voiceover.py    สร้าง voice-over ด้วย ElevenLabs
+  render_story_triplet_from_image.py เรนเดอร์ 3 คลิปจากภาพแม่ภาพเดียว
+  prepare_api_image.py     แปลงภาพให้ API รับได้
   check_tiktok_connection.py เช็ก env สำหรับ TikTok Developer
 workflow/
   tiktok-agent-workflow.yaml โครงสร้าง workflow ทั้งระบบ
+  story-channel-workflow.yaml โครงสร้าง workflow ช่องเรื่องเล่า
 ```
 
 ## ข้อควรรู้เรื่องการโพสต์

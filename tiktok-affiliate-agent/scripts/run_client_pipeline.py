@@ -59,7 +59,7 @@ AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
 # ElevenLabs output_format prefix -> the extension its bytes actually deserve.
 AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 FINAL_SUFFIXES = [".mp4", ".mov"]
-ASSET_LOG_VERSION = 3
+ASSET_LOG_VERSION = 4
 
 
 # ---------------------------------------------------------------- utilities
@@ -657,6 +657,48 @@ def shot_motion_fingerprint(shot: dict, brief: dict, still_stamp: str = "") -> s
     return text_fingerprint(compose_flow_prompt(shot, brief, "") + "|" + still_stamp)
 
 
+def asset_stamp(asset: "Path | None") -> str:
+    """Identity of a file on disk. Nanoseconds plus size so a same-second rewrite counts."""
+    if asset is None:
+        return ""
+    info = asset.stat()
+    return f"{asset.name}:{info.st_mtime_ns}:{info.st_size}"
+
+
+def script_scene_fingerprint(script: dict) -> str:
+    """The script content the shot list was written against."""
+    rows = [
+        "|".join(str(scene.get(key) or "") for key in ("id", "beat", "vo", "on_screen_text", "duration_sec"))
+        for scene in script.get("scenes", [])
+    ]
+    return text_fingerprint("\n".join(rows))
+
+
+def shot_list_is_stale(job: Job, script: dict) -> bool:
+    """True when the script changed after this shot list was written.
+
+    The shot list's visual descriptions come from the script text, so editing a
+    scene's narration invalidates the shots even if ids and durations still line up.
+    """
+    log_path = job.path / "source-log.json"
+    log = {}
+    if log_path.exists():
+        try:
+            loaded = read_json(log_path)
+            log = loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            log = {}
+    stamp = asset_stamp(job.shot_list_path if job.shot_list_path.exists() else None)
+    fingerprint = script_scene_fingerprint(script)
+    entry = log.get("shot_list") if isinstance(log.get("shot_list"), dict) else {}
+    if entry.get("stamp") != stamp:
+        # The shot list was just written, so it matches whatever the script says now.
+        log["shot_list"] = {"stamp": stamp, "script_sha": fingerprint}
+        write_json(log_path, log)
+        return False
+    return entry.get("script_sha") != fingerprint
+
+
 def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
     """Report missing and stale stills/clips, remembering what each asset was made from.
 
@@ -677,7 +719,7 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
         shot_id = str(shot.get("id") or "")
         record = log.get(shot_id) if isinstance(log.get(shot_id), dict) else {}
         still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
-        still_stamp = f"{still.name}:{int(still.stat().st_mtime)}" if still else ""
+        still_stamp = asset_stamp(still)
         for kind, directory, suffixes, fingerprint in (
             ("still", job.stills_dir, IMAGE_SUFFIXES, shot_image_fingerprint(shot, brief, rules)),
             ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot, brief, still_stamp)),
@@ -687,7 +729,8 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
                 result["missing_" + kind + "s"].append(shot_id)
                 record.pop(kind, None)
                 continue
-            stamp = f"{asset.name}:{int(asset.stat().st_mtime)}"
+            info = asset.stat()
+            stamp = f"{asset.name}:{info.st_mtime_ns}:{info.st_size}"
             entry = record.get(kind) if isinstance(record.get(kind), dict) else {}
             if entry.get("asset") != stamp or entry.get("v") != ASSET_LOG_VERSION:
                 # New asset, or a record written before the current fingerprint scheme:
@@ -786,6 +829,8 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     shots = shot_list.get("shots", []) if shot_list else []
     script_ok = stages["script"] == "done"
     problems = shot_list_problems(script, shots)
+    if shots and script_ok and shot_list_is_stale(job, script):
+        problems.append("สคริปต์ถูกแก้หลังจากสร้าง shot list ต้องรัน prompt 03 ใหม่")
     if shots and script_ok and not problems:
         stages["shot_list"] = "done"
     elif shots and not script_ok:

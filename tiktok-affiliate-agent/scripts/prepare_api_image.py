@@ -15,6 +15,7 @@ from PIL import Image, ImageFilter, ImageOps
 
 
 DEFAULT_MAX_BYTES = 4 * 1024 * 1024
+MIN_SIZE = 128
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,16 +71,23 @@ def square_pad(image: Image.Image, size: int) -> Image.Image:
     return canvas
 
 
-def save_under_limit(image: Image.Image, output_path: Path, max_bytes: int) -> tuple[int, int]:
+def save_under_limit(image: Image.Image, output_path: Path, max_bytes: int) -> tuple:
+    """Shrink until the file fits, and say so plainly when it cannot."""
     size = image.width
     current = image
     while True:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         current.save(output_path, format='PNG', optimize=True)
         bytes_written = output_path.stat().st_size
-        if bytes_written <= max_bytes or size <= 512:
+        if bytes_written <= max_bytes:
             return size, bytes_written
-        size = max(512, int(size * 0.9))
+        if size <= MIN_SIZE:
+            raise SystemExit(
+                f'ย่อจนถึง {size}x{size} แล้วยังได้ {bytes_written / (1024 * 1024):.2f} MB '
+                f'ซึ่งเกิน --max-mb ที่ตั้งไว้ ไฟล์ที่เขียนไว้คือ {output_path} '
+                f'ให้เพิ่ม --max-mb หรือใช้ภาพต้นทางที่รายละเอียดน้อยลง'
+            )
+        size = max(MIN_SIZE, int(size * 0.9))
         current = image.resize((size, size), Image.Resampling.LANCZOS)
 
 
