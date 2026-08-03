@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -51,6 +52,27 @@ def audio_extension(settings: dict) -> str:
     if fmt.startswith("ulaw") or fmt.startswith("mulaw"):
         return ".ulaw"
     return ".mp3"
+
+
+def text_fingerprint(text: str) -> str:
+    return hashlib.sha1(str(text or "").strip().encode("utf-8")).hexdigest()[:12]
+
+
+def read_render_log(voice_dir: Path) -> dict:
+    path = voice_dir / "rendered.json"
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_render_log(voice_dir: Path, log: dict) -> None:
+    path = voice_dir / "rendered.json"
+    path.write_text(json.dumps(log, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def find_existing_audio(directory: Path, stem: str) -> "Path | None":
@@ -132,6 +154,7 @@ def main(argv: "list | None" = None) -> None:
     api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     voice_id = (args.voice_id or os.environ.get("ELEVENLABS_VOICE_ID", "")).strip()
 
+    render_log = read_render_log(voice_dir)
     pending = []
     for row in rows:
         scene_id = str(row.get("scene_id") or "").strip()
@@ -142,7 +165,11 @@ def main(argv: "list | None" = None) -> None:
             print(f"[skip] {scene_id} ไม่มีข้อความพูด")
             continue
         existing = find_existing_audio(voice_dir, scene_id) or find_existing_audio(voice_dir, output.stem)
-        if existing and not args.overwrite:
+        record = render_log.get(scene_id) if isinstance(render_log.get(scene_id), dict) else {}
+        stale = bool(record.get("text_sha")) and record["text_sha"] != text_fingerprint(text)
+        if existing and stale:
+            print(f"[stale] {scene_id} เสียงเดิมอัดจากสคริปต์คนละเวอร์ชัน จะอัดใหม่")
+        elif existing and not args.overwrite:
             print(f"[skip] {scene_id} มีไฟล์อยู่แล้ว: {existing.name}")
             continue
         pending.append((scene_id, text, output))
@@ -185,6 +212,9 @@ def main(argv: "list | None" = None) -> None:
             failed += 1
             continue
         output.write_bytes(audio)
+        # Recording the text lets `sync` spot audio left over from an edited script.
+        render_log[scene_id] = {"text_sha": text_fingerprint(text), "file": output.name}
+        write_render_log(voice_dir, render_log)
         print(f"[ok] {scene_id} -> {output.name} ({len(audio)} bytes)")
 
     print()

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import re
@@ -108,6 +109,27 @@ def normalize_ids(entries: list, prefix: str, extra_keys: list = ()) -> None:
                 entry[key] = safe
 
 
+def entries_are_valid(entries: list, key: str, name: str) -> bool:
+    """Ids must stay unique after normalization and durations must be numbers.
+
+    Both feed filenames and arithmetic later, where a duplicate would let one asset
+    satisfy two entries and a `"three"` would abort `sync` with a ValueError.
+    """
+    ok = True
+    seen = set()
+    for entry in entries:
+        entry_id = str(entry.get("id") or "")
+        if entry_id in seen:
+            print(f"[warn] {name} มี id ซ้ำใน `{key}`: `{entry_id}` ต้องไม่ซ้ำเพราะใช้เป็นชื่อไฟล์")
+            ok = False
+        seen.add(entry_id)
+        duration = entry.get("duration_sec")
+        if duration is not None and str(duration).strip() != "" and as_float(duration, None) is None:
+            print(f"[warn] {name} `{entry_id}` มี duration_sec ที่ไม่ใช่ตัวเลข: {duration!r}")
+            ok = False
+    return ok
+
+
 def find_asset(directory: Path, stem: str, suffixes: list) -> "Path | None":
     """Find `<stem>.<suffix>` in a directory, matching the extension case-insensitively."""
     if not stem or not directory.exists():
@@ -141,6 +163,40 @@ def latest_file(directory: Path, suffixes: list) -> "Path | None":
     if not candidates:
         return None
     return max(candidates, key=lambda item: (item.stat().st_mtime, item.name))
+
+
+def as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def text_fingerprint(text: str) -> str:
+    return hashlib.sha1(str(text or "").strip().encode("utf-8")).hexdigest()[:12]
+
+
+def read_render_log(voice_dir: Path) -> dict:
+    """scene_id -> {text_sha, file} for audio this pipeline synthesized."""
+    path = voice_dir / "rendered.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = read_json(path)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def voice_is_stale(scene: dict, log: dict) -> bool:
+    """True when the recorded audio was synthesized from older script text.
+
+    Manually recorded audio has no log entry, so it is never called stale.
+    """
+    record = log.get(str(scene.get("id") or ""))
+    if not isinstance(record, dict) or not record.get("text_sha"):
+        return False
+    return record["text_sha"] != text_fingerprint(scene.get("vo"))
 
 
 def has_content(path: Path) -> bool:
@@ -226,13 +282,18 @@ def map_response(row: dict, keywords: dict) -> dict:
 def parse_duration(value, default: int) -> int:
     """Read a free-form duration answer without gluing separate numbers together."""
     text = str(value or "").strip()
-    numbers = [int(found) for found in re.findall(r"\d+", text)]
+    numbers = [float(found) for found in re.findall(r"\d+(?:\.\d+)?", text)]
     if not numbers:
         return default
     if re.search(r"นาที|minute|\bmin\b", text, re.IGNORECASE):
-        seconds = numbers[0] * 60 + (numbers[1] if len(numbers) > 1 else 0)
+        minutes = numbers[0]
+        seconds = minutes * 60
+        # `1.5 minutes` is 90s; a second number only means seconds for whole minutes.
+        if len(numbers) > 1 and float(minutes).is_integer():
+            seconds += numbers[1]
+        seconds = int(round(seconds))
     else:
-        seconds = numbers[0]
+        seconds = int(round(numbers[0]))
         if len(numbers) > 1:
             print(f"[warn] ความยาว `{text}` มีหลายตัวเลข ใช้ {seconds} วินาที ถ้าไม่ตรงให้ใส่ --field duration_sec=<วินาที>")
     if seconds < 3 or seconds > 900:
@@ -540,6 +601,8 @@ class Job:
             normalize_ids(entries, "sc")
         elif required_key == "shots":
             normalize_ids(entries, "sh", ["scene_id"])
+        if not entries_are_valid(entries, required_key, path.name):
+            return {}
         return payload
 
 
@@ -645,8 +708,16 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
     if scenes:
         write_voice_lines(job, brief, scenes, fields_config)
         voiced = [s for s in scenes if str(s.get("vo") or "").strip()]
-        missing_vo = [s for s in voiced if not find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES)]
+        render_log = read_render_log(job.voice_dir)
+        stale_vo = [s for s in voiced if find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES) and voice_is_stale(s, render_log)]
+        missing_vo = [
+            s
+            for s in voiced
+            if not find_asset(job.voice_dir, str(s.get("id", "")), AUDIO_SUFFIXES) or voice_is_stale(s, render_log)
+        ]
         stages["voiceover"] = "done" if not missing_vo else "ready"
+        if stale_vo:
+            print(f"[note] {len(stale_vo)} ซีนมีเสียงเก่าที่อัดจากสคริปต์คนละเวอร์ชัน ต้องอัดใหม่: {', '.join(str(s.get('id')) for s in stale_vo)}")
         if missing_vo:
             fields_flag = f' --fields "{fields_path}"' if fields_path and Path(fields_path) != DEFAULT_FIELDS else ""
             actions.append(
@@ -704,6 +775,7 @@ def asset_index(shots: list, folder: str, suffix: str) -> str:
 
 def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) -> None:
     path = job.voice_dir / "lines.csv"
+    render_log = read_render_log(job.voice_dir)
     fields = ["scene_id", "beat", "duration_sec", "vo_text", "output_file", "status"]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -714,8 +786,10 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
             existing = find_asset(job.voice_dir, scene_id, AUDIO_SUFFIXES)
             if not vo_text:
                 status = "no-vo"
+            elif not existing:
+                status = "todo"
             else:
-                status = "done" if existing else "todo"
+                status = "stale" if voice_is_stale(scene, render_log) else "done"
             writer.writerow(
                 {
                     "scene_id": scene_id,
@@ -773,7 +847,7 @@ def write_assembly_sheet(job: Job, script: dict, shots: list) -> None:
 
 
 def edit_notes(brief: dict, script: dict, shots: list) -> str:
-    total = sum(float(shot.get("duration_sec") or 0) for shot in shots)
+    total = sum(as_float(shot.get("duration_sec"), 0) for shot in shots)
     return "\n".join(
         [
             "# 06 Premiere Pro Edit Notes",
@@ -862,7 +936,12 @@ def archive_derived(job: Job) -> list:
     ]
     if not items:
         return []
-    target = job.path / f"archive-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = job.path / f"archive-{stamp}"
+    counter = 2
+    while target.exists():
+        target = job.path / f"archive-{stamp}-{counter}"
+        counter += 1
     target.mkdir()
     moved = []
     for item in items:
