@@ -97,14 +97,23 @@ def find_asset(directory: Path, stem: str, suffixes: list) -> "Path | None":
     return None
 
 
-def first_file(directory: Path, suffixes: list) -> "Path | None":
+def matching_files(directory: Path, suffixes: list) -> list:
     if not directory.exists():
-        return None
+        return []
     wanted = [suffix.lower() for suffix in suffixes]
-    for item in sorted(directory.iterdir()):
-        if item.is_file() and item.suffix.lower() in wanted and item.stat().st_size > 0:
-            return item
-    return None
+    return [
+        item
+        for item in sorted(directory.iterdir())
+        if item.is_file() and item.suffix.lower() in wanted and item.stat().st_size > 0
+    ]
+
+
+def latest_file(directory: Path, suffixes: list) -> "Path | None":
+    """Newest export wins, so a v2 re-cut is picked up instead of the older v1."""
+    candidates = matching_files(directory, suffixes)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: (item.stat().st_mtime, item.name))
 
 
 def has_content(path: Path) -> bool:
@@ -229,6 +238,36 @@ def parse_overrides(pairs: list) -> dict:
 # ------------------------------------------------------------------ prompts
 
 
+def intake_extras(brief: dict) -> str:
+    """Everything the client typed that has no dedicated slot in the prompts.
+
+    Free-text notes, the assets link, and answers from questions added to the form
+    later must reach the LLM, otherwise a mandatory instruction stays in brief.json.
+    """
+    labels = [
+        ("notes", "หมายเหตุจากลูกค้า"),
+        ("assets_link", "ไฟล์/ภาพที่ลูกค้าส่งมา"),
+        ("deadline", "กำหนดส่ง"),
+    ]
+    lines = []
+    for key, label in labels:
+        value = str(brief.get(key) or "").strip()
+        if value:
+            lines.append(f"- {label}: {value}")
+    extra = brief.get("form_extra")
+    if isinstance(extra, dict):
+        for header, value in extra.items():
+            if re.search(r"timestamp|ประทับเวลา", str(header), re.IGNORECASE):
+                continue
+            lines.append(f"- {header}: {value}")
+    return "\n".join(lines)
+
+
+def extras_block(brief: dict) -> list:
+    extras = intake_extras(brief)
+    return ["", "ข้อมูลเพิ่มเติมจากฟอร์ม (ต้องอ่านและห้ามขัด):", extras] if extras else []
+
+
 def brand_bible_prompt(brief: dict, rules: dict) -> str:
     return "\n".join(
         [
@@ -251,6 +290,9 @@ def brand_bible_prompt(brief: dict, rules: dict) -> str:
             f"- ต้องมี: {brief.get('must_include', '-')}",
             f"- ห้ามมี: {brief.get('avoid', '-')}",
             f"- ตัวอย่างที่ลูกค้าชอบ: {brief.get('reference', '-')}",
+        ]
+        + extras_block(brief)
+        + [
             "",
             "ให้ผลลัพธ์เป็นหัวข้อดังนี้",
             "1. Positioning หนึ่งประโยค",
@@ -286,6 +328,9 @@ def script_prompt(brief: dict, brand_bible: str) -> str:
             f"ลูกค้า: {brief.get('client_name', '-')} | สินค้า/บริการ: {brief.get('product', '-')}",
             f"เป้าหมาย: {brief.get('goal', '-')}",
             f"ต้องมี: {brief.get('must_include', '-')} | ห้ามมี: {brief.get('avoid', '-')}",
+        ]
+        + extras_block(brief)
+        + [
             "",
             "ใช้ Brand Bible นี้เป็นกรอบ:",
             bible_block,
@@ -326,6 +371,9 @@ def shot_list_prompt(brief: dict, script: dict, rules: dict) -> str:
             "```text",
             "แตกสคริปต์นี้เป็น shot list สำหรับผลิตด้วยภาพนิ่ง AI แล้วนำไป animate ต่อใน Google Flow",
             f"สัดส่วนภาพ: {brief.get('aspect_ratio', '9:16')} | สินค้า/บริการ: {brief.get('product', '-')}",
+        ]
+        + extras_block(brief)
+        + [
             "",
             "สคริปต์:",
             "\n".join(scene_lines) if scene_lines else "-",
@@ -397,13 +445,13 @@ def compose_image_prompt(shot: dict, brief: dict, rules: dict) -> str:
     )
 
 
-def compose_flow_prompt(shot: dict, brief: dict) -> str:
+def compose_flow_prompt(shot: dict, brief: dict, still_name: str) -> str:
     motion = str(shot.get("motion_prompt") or "").strip() or str(shot.get("camera_move") or "slow push in").strip()
     return "\n".join(
         [
             f"[{shot.get('id', '')}] Google Flow animate - {shot.get('duration_sec', 0)}s",
             "",
-            f"ภาพต้นทาง: stills/{shot.get('id', 'sh-xx')}.png",
+            f"ภาพต้นทาง: stills/{still_name}",
             "",
             "MOTION PROMPT",
             motion,
@@ -450,10 +498,38 @@ class Job:
         if not isinstance(payload, dict):
             print(f"[warn] {path.name} ต้องเป็น JSON object ที่มีคีย์ `{required_key}` ไม่ใช่ {type(payload).__name__}")
             return {}
-        if not payload.get(required_key):
-            print(f"[warn] {path.name} ไม่มีคีย์ `{required_key}`")
+        entries = payload.get(required_key)
+        if not isinstance(entries, list) or not entries:
+            print(f"[warn] {path.name} ต้องมีคีย์ `{required_key}` เป็น list ที่ไม่ว่าง")
+            return {}
+        bad = [index for index, entry in enumerate(entries, start=1) if not isinstance(entry, dict)]
+        if bad:
+            print(f"[warn] {path.name} รายการที่ {', '.join(str(index) for index in bad)} ใน `{required_key}` ไม่ใช่ object")
             return {}
         return payload
+
+
+def uncovered_scenes(script: dict, shots: list) -> list:
+    """Scenes that no shot references — editing cannot be ready while any exist."""
+    if not script or not shots:
+        return []
+    covered = {str(shot.get("scene_id") or "").strip() for shot in shots}
+    missing = []
+    for scene in script.get("scenes", []):
+        scene_id = str(scene.get("id") or "").strip()
+        if scene_id and scene_id not in covered:
+            missing.append(scene_id)
+    return missing
+
+
+def audio_extension(fields_config: dict) -> str:
+    """File extension that matches what ElevenLabs will actually return."""
+    fmt = str((fields_config.get("elevenlabs") or {}).get("output_format", "mp3_44100_128")).lower()
+    if fmt.startswith("pcm") or fmt.startswith("wav"):
+        return ".wav"
+    if fmt.startswith("ulaw") or fmt.startswith("mulaw"):
+        return ".ulaw"
+    return ".mp3"
 
 
 def sync_job(job: Job, fields_config: dict) -> dict:
@@ -494,8 +570,12 @@ def sync_job(job: Job, fields_config: dict) -> dict:
         write_text(job.path / "03-shot-list-prompt.md", shot_list_prompt(brief, script, rules))
     shot_list = job.load_stage_json(job.shot_list_path, "shots")
     shots = shot_list.get("shots", []) if shot_list else []
-    if shots:
+    uncovered = uncovered_scenes(script, shots)
+    if shots and not uncovered:
         stages["shot_list"] = "done"
+    elif shots:
+        stages["shot_list"] = "ready"
+        actions.append(f"`shot-list.json` ยังไม่มีช็อตให้ซีน {', '.join(uncovered)} ต้องเพิ่มก่อนถึงจะตัดต่อได้")
     elif script:
         stages["shot_list"] = "ready"
         actions.append("รัน prompt ใน `03-shot-list-prompt.md` แล้วบันทึกผลเป็น `shot-list.json`")
@@ -508,8 +588,9 @@ def sync_job(job: Job, fields_config: dict) -> dict:
         flow_dir = job.path / "05-flow-prompts"
         for shot in shots:
             shot_id = str(shot.get("id") or "").strip() or "sh-xx"
+            still = find_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES)
             write_text(image_dir / f"{shot_id}.txt", compose_image_prompt(shot, brief, rules))
-            write_text(flow_dir / f"{shot_id}.txt", compose_flow_prompt(shot, brief))
+            write_text(flow_dir / f"{shot_id}.txt", compose_flow_prompt(shot, brief, still.name if still else f"{shot_id}.png"))
         write_text(image_dir / "README.md", asset_index(shots, "stills", "png"))
         write_text(flow_dir / "README.md", asset_index(shots, "clips", "mp4"))
 
@@ -541,8 +622,13 @@ def sync_job(job: Job, fields_config: dict) -> dict:
     if shots and scenes:
         write_assembly_sheet(job, script, shots)
         write_text(job.path / "06-edit-notes.md", edit_notes(brief, script, shots))
-        final_file = first_file(job.final_dir, FINAL_SUFFIXES)
-        ready_to_cut = stages["animate"] == "done" and stages["voiceover"] == "done"
+        final_file = latest_file(job.final_dir, FINAL_SUFFIXES)
+        exports = matching_files(job.final_dir, FINAL_SUFFIXES)
+        if final_file and len(exports) > 1:
+            print(f"[note] มีไฟล์ใน final/ {len(exports)} ไฟล์ ใช้ไฟล์ล่าสุด: {final_file.name}")
+        ready_to_cut = (
+            stages["shot_list"] == "done" and stages["animate"] == "done" and stages["voiceover"] == "done"
+        )
         stages["edit"] = "done" if final_file else ("ready" if ready_to_cut else "waiting")
         if stages["edit"] == "ready":
             actions.append("ตัดใน Premiere Pro ตาม `06-assembly-sheet.csv` แล้ว export ลง `final/`")
@@ -598,7 +684,9 @@ def write_voice_lines(job: Job, brief: dict, scenes: list, fields_config: dict) 
                     "beat": scene.get("beat", ""),
                     "duration_sec": scene.get("duration_sec", ""),
                     "vo_text": vo_text,
-                    "output_file": existing.name if existing else f"{scene_id}.mp3",
+                    # Always the synthesis target, never an existing .wav: writing MP3
+                    # bytes into a .wav name would break decoders downstream.
+                    "output_file": f"{scene_id}{audio_extension(fields_config)}",
                     "status": status,
                 }
             )

@@ -43,6 +43,16 @@ def resolve_job(jobs_root: str, job_id: str) -> Path:
 AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a"]
 
 
+def audio_extension(settings: dict) -> str:
+    """Never name a file .wav when the API is about to hand back MP3 bytes."""
+    fmt = str(settings.get("output_format", "mp3_44100_128")).lower()
+    if fmt.startswith("pcm") or fmt.startswith("wav"):
+        return ".wav"
+    if fmt.startswith("ulaw") or fmt.startswith("mulaw"):
+        return ".ulaw"
+    return ".mp3"
+
+
 def find_existing_audio(directory: Path, stem: str) -> "Path | None":
     """Any supported recording counts, whatever its case or extension."""
     if not stem or not directory.exists():
@@ -126,7 +136,8 @@ def main(argv: "list | None" = None) -> None:
     for row in rows:
         scene_id = str(row.get("scene_id") or "").strip()
         text = str(row.get("vo_text") or "").strip()
-        output = voice_dir / (row.get("output_file") or f"{scene_id or 'sc-xx'}.mp3")
+        named = Path(str(row.get("output_file") or "").strip() or f"{scene_id or 'sc-xx'}.mp3").name
+        output = voice_dir / (Path(named).stem + audio_extension(settings))
         if not text:
             print(f"[skip] {scene_id} ไม่มีข้อความพูด")
             continue
