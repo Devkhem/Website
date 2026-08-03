@@ -230,7 +230,7 @@ def retention_rule_lines(config: dict) -> list:
     ]
 
 
-def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False, decision_key: str = "", wants_new_image: bool = True, unmappable: bool = False, awaiting_metric: bool = False) -> str:
+def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False, decision_key: str = "", wants_new_image: bool = True, unmappable: bool = False, awaiting_metric: bool = False, malformed_count: int = 0) -> str:
     handle = account.get("handle", "@thatslife6969")
     lines = [
         f"# Story Channel Plan: {plan_date}",
@@ -259,7 +259,12 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
     lines.extend(retention_rule_lines(config))
     lines.append("")
     if not packages:
-        if awaiting_metric:
+        if malformed_count:
+            reason = (
+                f"metrics มี {malformed_count} แถวที่ไม่ได้ระบุ episode เป็นตัวเลข\n"
+                "แก้คอลัมน์ episode ให้ครบก่อน ไม่งั้นระบบจะนับว่ายังไม่เคยโพสต์"
+            )
+        elif awaiting_metric:
             reason = (
                 "โพสต์ไปแล้วแต่ยังไม่มี retention ที่วัดตอน 2 ชั่วโมง\n"
                 "กรอกผลที่ measured_after_hours = 2 ก่อน แล้วค่อยรันใหม่"
@@ -424,6 +429,8 @@ def main() -> None:
     unknown_rows = posted_episodes(history) - known
     if unknown_rows:
         print(f"[warn] ข้าม metrics ของ episode ที่ไม่มีใน series: {', '.join(str(n) for n in sorted(unknown_rows))}")
+    # A row with no usable episode number would silently look like "never posted".
+    malformed_rows = [row for row in history if not episode_number(row)]
     metrics = [row for row in metrics if episode_number(row) in known]
     posted = posted_episodes(history) & known
     posting_windows = config.get("posting_windows") or ["12:00", "18:30", "22:30"]
@@ -438,7 +445,7 @@ def main() -> None:
     exhausted = decision_key != "kill" and not [
         item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
     ]
-    episodes = [] if awaiting_metric else select_episodes(series, decision_key, posted, target_episode)
+    episodes = [] if (awaiting_metric or malformed_rows) else select_episodes(series, decision_key, posted, target_episode)
     unmappable = decision_key == "rewrite_hook" and not episodes
     needs_hook = decision_key == "rewrite_hook" and not unmappable and not args.hook.strip()
     if needs_hook:
@@ -474,7 +481,7 @@ def main() -> None:
     (output_dir / "story-channel-plan.md").write_text(
         render_markdown(
             account, config, series, packages, decision, args.date, exhausted, needs_hook,
-            decision_key, wants_new_image, unmappable, awaiting_metric,
+            decision_key, wants_new_image, unmappable, awaiting_metric, len(malformed_rows),
         ),
         encoding="utf-8",
     )
@@ -488,7 +495,9 @@ def main() -> None:
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
     print(f"Decision: {decision}")
-    if awaiting_metric:
+    if malformed_rows:
+        print(f"ไม่ได้สร้าง episode package เพราะ metrics มี {len(malformed_rows)} แถวที่ไม่ได้ระบุ episode เป็นตัวเลข")
+    elif awaiting_metric:
         print("ไม่ได้สร้าง episode package เพราะยังไม่มี retention ที่วัดตอน 2 ชั่วโมงของตอนที่โพสต์ไปแล้ว")
     elif unmappable:
         print(f"ไม่ได้สร้าง episode package เพราะ metrics ชี้ไป episode {target_episode or '(ว่าง)'} ที่ไม่มีใน series")

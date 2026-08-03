@@ -16,6 +16,7 @@ from PIL import Image, ImageFilter, ImageOps
 
 DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 MIN_SIZE = 128
+FORMATS = {'.png': 'PNG', '.jpg': 'JPEG', '.jpeg': 'JPEG', '.webp': 'WEBP'}
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,13 +72,24 @@ def square_pad(image: Image.Image, size: int) -> Image.Image:
     return canvas
 
 
+def output_format(output_path: Path) -> str:
+    """Write the format the filename promises; uploaders trust the extension."""
+    suffix = output_path.suffix.lower()
+    if suffix not in FORMATS:
+        raise SystemExit(
+            f"นามสกุล {suffix or '(ไม่มี)'} ไม่รองรับ ให้ใช้ {', '.join(sorted(FORMATS))}"
+        )
+    return FORMATS[suffix]
+
+
 def save_under_limit(image: Image.Image, output_path: Path, max_bytes: int) -> tuple:
     """Shrink until the file fits, and say so plainly when it cannot."""
     size = image.width
     current = image
+    fmt = output_format(output_path)
     while True:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        current.save(output_path, format='PNG', optimize=True)
+        current.save(output_path, format=fmt, optimize=True)
         bytes_written = output_path.stat().st_size
         if bytes_written <= max_bytes:
             return size, bytes_written
@@ -107,7 +119,7 @@ def main() -> None:
 
     print(f'Created {output_path}')
     print(f'Input: {image.width}x{image.height} {image.mode}')
-    print(f'Output: {final_size}x{final_size} PNG RGB, {bytes_written / (1024 * 1024):.2f} MB')
+    print(f'Output: {final_size}x{final_size} {output_format(output_path)} RGB, {bytes_written / (1024 * 1024):.2f} MB')
 
 
 if __name__ == '__main__':

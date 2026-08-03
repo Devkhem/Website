@@ -906,12 +906,24 @@ def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str) -> bool
     log = read_source_log(job)
     stamp = asset_stamp(derived if derived.exists() else None)
     entry = log.get(key) if isinstance(log.get(key), dict) else {}
-    if entry.get("stamp") != stamp or entry.get("v") != SOURCE_LOG_VERSION:
-        # New file, or a record written before this fingerprint scheme: adopt what is on disk.
-        log[key] = {"stamp": stamp, "source_sha": source_sha, "v": SOURCE_LOG_VERSION}
+    if entry.get("stamp") != stamp:
+        # The derived file was just rewritten, so it matches its sources by definition.
+        log[key] = {"stamp": stamp, "source_sha": source_sha, "v": SOURCE_LOG_VERSION, "stale": False}
         write_json(job.path / "source-log.json", log)
         return False
-    return entry.get("source_sha") != source_sha
+    if entry.get("v") != SOURCE_LOG_VERSION:
+        # A tool-template change moved the fingerprint, so the old hash cannot be
+        # compared. Carry the verdict we already recorded instead of blessing the job.
+        carried = bool(entry.get("stale"))
+        log[key] = {"stamp": stamp, "source_sha": source_sha, "v": SOURCE_LOG_VERSION, "stale": carried}
+        write_json(job.path / "source-log.json", log)
+        return carried
+    stale = entry.get("source_sha") != source_sha
+    if entry.get("stale") != stale:
+        entry["stale"] = stale
+        log[key] = entry
+        write_json(job.path / "source-log.json", log)
+    return stale
 
 
 def brand_bible_source_fingerprint(brief: dict, rules: dict) -> str:

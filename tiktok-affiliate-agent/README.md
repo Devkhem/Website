@@ -91,9 +91,9 @@ python3 scripts/prepare_api_image.py outputs/<วันที่>/room-407-chatg
 
 ## การติดตั้ง
 
-สคริปต์วางแผนทุกตัวใช้ Python มาตรฐาน รันได้เลยไม่ต้องติดตั้งอะไร
-เฉพาะสคริปต์ที่ทำงานกับรูปหรือวิดีโอ (`prepare_api_image.py`, `render_story_triplet_from_image.py`)
-ต้องใช้ Pillow
+`run_daily_plan.py` กับ `run_story_channel_plan.py` ใช้ Python มาตรฐาน รันได้เลย
+ส่วน client pipeline ต้องใช้ Pillow (ตรวจไฟล์ภาพ) และ ffmpeg/ffprobe (ตรวจคลิป เสียง ไฟล์ final)
+เช่นเดียวกับ `prepare_api_image.py` และ `render_story_triplet_from_image.py`
 
 ```bash
 python3 -m pip install -r requirements.txt

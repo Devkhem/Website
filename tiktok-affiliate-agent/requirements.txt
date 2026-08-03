@@ -1,5 +1,7 @@
-# ติดตั้งเฉพาะตอนจะใช้สคริปต์ที่ทำงานกับรูปหรือวิดีโอ
-# scripts/prepare_api_image.py และ scripts/render_story_triplet_from_image.py ต้องใช้ Pillow
-# สคริปต์วางแผนทั้งหมด (run_daily_plan, run_story_channel_plan, run_client_pipeline,
-# generate_voiceover) ใช้ไลบรารีมาตรฐานของ Python ล้วน ไม่ต้องติดตั้งอะไรเพิ่ม
+# ต้องใช้ Pillow สำหรับ
+#   scripts/prepare_api_image.py           แปลงภาพให้ API รับได้
+#   scripts/render_story_triplet_from_image.py  เรนเดอร์คลิป
+#   scripts/run_client_pipeline.py         ตรวจว่าไฟล์ภาพเปิดได้จริงก่อนนับว่าเสร็จ
+# ส่วน run_daily_plan และ run_story_channel_plan ใช้ไลบรารีมาตรฐานล้วน
+# นอกจากนี้ต้องมี ffmpeg/ffprobe ในเครื่องสำหรับตรวจไฟล์คลิป เสียง และไฟล์ final
 Pillow>=10.0
