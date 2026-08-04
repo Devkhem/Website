@@ -110,7 +110,13 @@ def read_render_log(voice_dir: Path) -> dict:
     try:
         with path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            f"`{path}` เสียหาย ({error})\n"
+            f"ไฟล์นี้เก็บว่าเสียงแต่ละซีนอัดมาจากข้อความและเสียงเวอร์ชันไหน\n"
+            f"ถ้ากู้ไม่ได้ให้ลบทิ้งแล้วอัดใหม่ทั้งงาน"
+        )
+    except OSError:
         return {}
     return payload if isinstance(payload, dict) else {}
 

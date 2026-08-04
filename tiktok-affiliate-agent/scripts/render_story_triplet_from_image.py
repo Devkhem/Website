@@ -259,7 +259,8 @@ def background(bg: Image.Image, sec: float, episode_index: int, beat_index: int,
     # Cycle instead of indexing: a series may hold more than three episodes.
     zoom_steps = [1.0, 1.035, 1.065]
     zoom_base = zoom_steps[episode_index % len(zoom_steps)]
-    zoom = zoom_base + 0.025 * (sec / span) + 0.012 * math.sin(sec * 0.45 + episode_index)
+    # Never below 1.0: a smaller resize would leave black padding at the crop edges.
+    zoom = max(1.0, zoom_base + 0.025 * (sec / span) + 0.012 * math.sin(sec * 0.45 + episode_index))
     resized = bg.resize((int(W * zoom), int(H * zoom)), Image.Resampling.LANCZOS)
     max_x = resized.width - W
     max_y = resized.height - H
@@ -323,7 +324,7 @@ def draw_frame(bg: Image.Image, episode: dict, episode_index: int, frame: int) -
     else:
         subtitle(draw, title, sub, local, danger=beat_index >= 4)
 
-    if beat_index == 2 and episode_index == 0:
+    if beat_index == 2 and episode.get("number", episode_index + 1) == 1:
         for i in range(3):
             draw.text((360, 430 + i * 68), "ก๊อก", font=F60, fill=(255, 255, 255, 92 + i * 42), anchor="ma")
 

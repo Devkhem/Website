@@ -209,11 +209,12 @@ def decode_problem(path: Path, kind: str) -> str:
     )
     if result.returncode != 0 or not result.stdout.strip():
         return "ถอดรหัสไม่ได้ ไฟล์อาจเสียหรือดาวน์โหลดไม่ครบ"
-    if kind == "clip":
+    if kind in {"clip", "audio"}:
         # Container metadata survives a truncated download; the packets do not.
         issue = full_decode_problem(path)
         if issue:
-            return f"เล่นคลิปจนจบไม่ได้: {issue}"
+            label = "คลิป" if kind == "clip" else "เสียง"
+            return f"เล่น{label}จนจบไม่ได้: {issue}"
     return ""
 
 
@@ -374,14 +375,22 @@ def text_fingerprint(text: str) -> str:
 
 
 def read_render_log(voice_dir: Path) -> dict:
-    """scene_id -> {text_sha, file} for audio this pipeline synthesized."""
+    """scene_id -> {text_sha, file} for audio this pipeline synthesized.
+
+    Losing it would turn every synthesized take into an untracked manual one, which
+    can never be called stale — so a damaged log stops the run.
+    """
     path = voice_dir / "rendered.json"
     if not path.exists():
         return {}
     try:
         payload = read_json(path)
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            f"`{path}` เสียหาย ({error})\n"
+            f"ไฟล์นี้เก็บว่าเสียงแต่ละซีนอัดมาจากข้อความและเสียงเวอร์ชันไหน\n"
+            f"ถ้ากู้ไม่ได้ให้ลบทิ้งแล้วอัดเสียงใหม่ทั้งงาน"
+        )
     return payload if isinstance(payload, dict) else {}
 
 
@@ -1050,9 +1059,13 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
     if log_path.exists():
         try:
             loaded = read_json(log_path)
-            log = loaded if isinstance(loaded, dict) else {}
-        except json.JSONDecodeError:
-            log = {}
+        except json.JSONDecodeError as error:
+            raise SystemExit(
+                f"`{log_path}` เสียหาย ({error})\n"
+                f"ไฟล์นี้เก็บว่าภาพและคลิปแต่ละช็อตทำมาจากนิยามเวอร์ชันไหน\n"
+                f"ถ้ากู้ไม่ได้ให้ลบทิ้งแล้วรัน sync ใหม่ ระบบจะรับไฟล์ที่มีอยู่เป็นของปัจจุบันทั้งหมด"
+            )
+        log = loaded if isinstance(loaded, dict) else {}
 
     result = {"missing_stills": [], "stale_stills": [], "missing_clips": [], "stale_clips": []}
     for shot in shots:
@@ -1475,12 +1488,17 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             and stages["voiceover"] == "done"
         )
         stale_export = False
-        if final_file:
-            digest = content_digest(final_file)
-            migrate_final_entry(job, digest)
-            stale_export = derived_is_stale(
-                job, f"final:{digest}", final_file, export_inputs_fingerprint(job, shots, scenes), digest
-            )
+        if exports:
+            inputs_sha = export_inputs_fingerprint(job, shots, scenes)
+            for export in exports:
+                # Stamp every candidate now: selecting another cut later must not let
+                # it adopt inputs it was never built from.
+                digest = content_digest(export)
+                if final_file and export == final_file:
+                    migrate_final_entry(job, digest)
+                verdict = derived_is_stale(job, f"final:{digest}", export, inputs_sha, digest)
+                if final_file and export == final_file:
+                    stale_export = verdict
         broken_export = export_problem(final_file, brief) if (final_file and not stale_export) else ""
         if broken_export:
             print(f"[note] `final/{final_file.name}` {broken_export} ต้อง export ใหม่")

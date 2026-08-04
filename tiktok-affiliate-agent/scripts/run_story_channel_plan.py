@@ -182,7 +182,16 @@ def episode_package(series: dict, episode: dict, posting_time: str, decision_key
         hook = new_hook
     twist = episode.get("twist", "")
     series_title = series.get("title", "")
-    caption = f"{hook} ฟังให้จบแล้วบอกทีว่าคุณจะเปิดไหม"
+    configured = next(
+        (
+            str(item.get("caption") or "")
+            for item in series.get("render_beats", [])
+            if int(item.get("episode", 0)) == int(episode.get("episode", 0))
+        ),
+        "",
+    )
+    # The renderer prints the configured caption beside the MP4, so the queue uses it too.
+    caption = configured or f"{hook} ฟังให้จบแล้วบอกทีว่าคุณจะเปิดไหม"
     hashtags = "#เรื่องผี #เล่าเรื่องผี #เรื่องหลอนก่อนนอน #TikTokThailand #หลอน"
     script = "\n".join(
         [
