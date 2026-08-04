@@ -19,8 +19,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 ROOT = Path(__file__).resolve().parents[1]
 W, H = 720, 1280
 FPS = 30
-CLIP_DURATION = 22
-FRAMES = FPS * CLIP_DURATION
+DEFAULT_CLIP_DURATION = 22
 SR = 44100
 
 INK = "#f4f7fb"
@@ -33,7 +32,7 @@ GREEN = "#91ffc2"
 EPISODES = []
 
 
-def load_episodes(story_path: str, series_id: str, hook: str = "") -> tuple:
+def load_episodes(story_path: str, series_id: str, hook: str = "", only_episode: int = 0) -> tuple:
     """Beats come from the selected series, so a rerun renders what the plan says."""
     config = json.loads(Path(story_path).read_text(encoding="utf-8"))
     series_list = config.get("series", [])
@@ -46,21 +45,28 @@ def load_episodes(story_path: str, series_id: str, hook: str = "") -> tuple:
             f"series `{series['id']}` ยังไม่มี `render_beats` ใน {story_path}\n"
             f"renderer วาดข้อความตามบีทที่กำหนดไว้ในไฟล์นั้น ให้เพิ่มก่อนถึงจะเรนเดอร์ได้"
         )
+    if hook and not only_episode:
+        raise SystemExit("--hook ต้องใช้คู่กับ --episode เพราะ hook ใหม่เป็นของตอนเดียว ไม่ใช่ทั้งซีรีส์")
     episodes = []
     for item in render_beats:
+        number = int(item.get("episode", len(episodes) + 1))
+        if only_episode and number != only_episode:
+            continue
         beats = [(as_seconds(beat["start"]), as_seconds(beat["end"]), beat["title"], beat["sub"])
                  for beat in item.get("beats", [])]
         if hook and beats:
             first = beats[0]
             beats[0] = (first[0], first[1], hook, first[3])
         episodes.append({
-            "id": f"{series['id']}-ep{item.get('episode', len(episodes) + 1)}",
+            "id": f"{series['id']}-ep{number}",
             "title": item.get("title", ""),
             "beats": beats,
             "phone_beats": item.get("phone_beats", []),
             "phone_context": tuple(item.get("phone_context") or ("ไม่ทราบชื่อ", "")),
             "caption": item.get("caption", ""),
         })
+    if only_episode and not episodes:
+        raise SystemExit(f"ไม่พบตอน {only_episode} ใน series `{series['id']}`")
     return series, episodes
 
 
@@ -99,6 +105,7 @@ FONT_HELP = (
 
 _FONT_PATH = ""
 HANDLE = "@thatslife6969"
+SERIES_TITLE = "ห้อง 407"
 F22 = F26 = F30 = F38 = F48 = F60 = None
 
 
@@ -170,7 +177,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--handle", default="", help="ทับ handle ที่จะพิมพ์ลงบนคลิป.")
     parser.add_argument("--story", default=str(ROOT / "data" / "story_series.json"), help="ไฟล์ series ที่มี render_beats.")
     parser.add_argument("--series-id", default="room-407", help="series ที่จะเรนเดอร์.")
-    parser.add_argument("--hook", default="", help="hook ใหม่สำหรับรอบที่เปลี่ยน hook.")
+    parser.add_argument("--episode", type=int, default=0, help="เรนเดอร์เฉพาะตอนนี้ เช่น 2.")
+    parser.add_argument("--hook", default="", help="hook ใหม่ ใช้ได้เฉพาะตอนที่ระบุด้วย --episode.")
     parser.add_argument("--frames-only", action="store_true", help="สร้างเฉพาะเฟรมกับเสียง ไม่ encode เป็น MP4.")
     return parser.parse_args()
 
@@ -246,9 +254,9 @@ def prepare_bg(path: Path) -> Image.Image:
     return src.crop((left, top, left + W, top + H))
 
 
-def background(bg: Image.Image, sec: float, episode_index: int, beat_index: int) -> Image.Image:
+def background(bg: Image.Image, sec: float, episode_index: int, beat_index: int, span: float = DEFAULT_CLIP_DURATION) -> Image.Image:
     zoom_base = [1.0, 1.035, 1.065][episode_index]
-    zoom = zoom_base + 0.025 * (sec / CLIP_DURATION) + 0.012 * math.sin(sec * 0.45 + episode_index)
+    zoom = zoom_base + 0.025 * (sec / span) + 0.012 * math.sin(sec * 0.45 + episode_index)
     resized = bg.resize((int(W * zoom), int(H * zoom)), Image.Resampling.LANCZOS)
     max_x = resized.width - W
     max_y = resized.height - H
@@ -292,13 +300,13 @@ def subtitle(draw: ImageDraw.ImageDraw, title: str, sub: str, local: float, dang
 def draw_frame(bg: Image.Image, episode: dict, episode_index: int, frame: int) -> Image.Image:
     sec = frame / FPS
     beat_index, title, sub, local = active_beat(episode, sec)
-    img = background(bg, sec, episode_index, beat_index)
+    img = background(bg, sec, episode_index, beat_index, episode_duration(episode))
     draw = ImageDraw.Draw(img)
 
-    progress = int((W - 56) * sec / CLIP_DURATION)
+    progress = int((W - 56) * sec / episode_duration(episode))
     rounded(draw, (28, 28, W - 28, 40), 6, (70, 75, 86, 185))
     rounded(draw, (28, 28, 28 + progress, 40), 6, RED)
-    draw.text((32, 58), f"ห้อง 407 ตอน {episode_index + 1}", font=F22, fill=MUTED)
+    draw.text((32, 58), f"{SERIES_TITLE} ตอน {episode_index + 1}", font=F22, fill=MUTED)
     draw.text((W - 32, 58), HANDLE, font=F22, fill=MUTED, anchor="ra")
 
     if beat_index == 0:
@@ -319,7 +327,7 @@ def draw_frame(bg: Image.Image, episode: dict, episode_index: int, frame: int) -
     return img.convert("RGB")
 
 
-def write_audio(path: Path, duration: int) -> None:
+def write_audio(path: Path, duration: float) -> None:
     samples = int(duration * SR)
     rng = random.Random(407)
     with wave.open(str(path), "w") as f:
@@ -344,10 +352,16 @@ def write_audio(path: Path, duration: int) -> None:
             f.writeframesraw(struct.pack("<hh", int(val * 23000), int(val * 23000)))
 
 
+def episode_duration(episode: dict) -> float:
+    """The clip lasts as long as its last beat says it does."""
+    beats = episode.get("beats") or []
+    return max((beat[1] for beat in beats), default=DEFAULT_CLIP_DURATION)
+
+
 def render_episode(bg: Image.Image, episode: dict, episode_index: int, out_dir: Path) -> Path:
     frames_dir = out_dir / f"{episode['id']}_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    for frame in range(FRAMES):
+    for frame in range(int(round(episode_duration(episode) * FPS))):
         draw_frame(bg, episode, episode_index, frame).save(frames_dir / f"frame_{frame:04d}.jpg", quality=92)
     return frames_dir
 
@@ -368,18 +382,19 @@ def resolve_handle(account_path: str, override: str) -> str:
 
 
 def main() -> None:
-    global HANDLE, EPISODES
+    global HANDLE, EPISODES, SERIES_TITLE
     args = parse_args()
-    series, EPISODES = load_episodes(args.story, args.series_id, args.hook.strip())
+    series, EPISODES = load_episodes(args.story, args.series_id, args.hook.strip(), args.episode)
+    SERIES_TITLE = series.get("title") or series.get("id", "")
     HANDLE = resolve_handle(args.account, args.handle)
     load_fonts(args.font)
     out_dir = Path(args.out)
     videos_dir = out_dir / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
     bg = prepare_bg(Path(args.image))
-    audio_path = videos_dir / "room-407-triplet-ambient.wav"
-    write_audio(audio_path, CLIP_DURATION)
     for index, episode in enumerate(EPISODES):
+        audio_path = videos_dir / f"{episode['id']}-ambient.wav"
+        write_audio(audio_path, episode_duration(episode))
         frames_dir = render_episode(bg, episode, index, videos_dir)
         if args.frames_only:
             print(f"{episode['id']}|{frames_dir}|{audio_path}|{episode['caption']}")

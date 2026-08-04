@@ -209,6 +209,11 @@ def decode_problem(path: Path, kind: str) -> str:
     )
     if result.returncode != 0 or not result.stdout.strip():
         return "ถอดรหัสไม่ได้ ไฟล์อาจเสียหรือดาวน์โหลดไม่ครบ"
+    if kind == "clip":
+        # Container metadata survives a truncated download; the packets do not.
+        issue = full_decode_problem(path)
+        if issue:
+            return f"เล่นคลิปจนจบไม่ได้: {issue}"
     return ""
 
 
@@ -1058,9 +1063,16 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
             stamp = content_digest(asset)
             entry = record.get(kind) if isinstance(record.get(kind), dict) else {}
             if entry.get("v") in {4, 5} and entry.get("sha"):
-                # Only the stamp representation changed: keep the recorded fingerprint
-                # so a shot whose definition moved stays stale.
-                entry = {"asset": stamp, "sha": entry["sha"], "v": ASSET_LOG_VERSION}
+                # v5 stored `name:size:digest`; compare its digest with the file now.
+                previous = entry.get("asset", "")
+                same_bytes = entry.get("v") == 5 and previous.split(":", 1)[-1] == stamp
+                if same_bytes:
+                    # Only the stamp representation changed: keep the fingerprint so a
+                    # shot whose definition moved stays stale.
+                    entry = {"asset": stamp, "sha": entry["sha"], "v": ASSET_LOG_VERSION}
+                else:
+                    # Different bytes: the artist regenerated it, so adopt what is here.
+                    entry = {"asset": stamp, "sha": fingerprint, "v": ASSET_LOG_VERSION}
                 record[kind] = entry
             if entry.get("asset") != stamp or not entry.get("sha"):
                 record[kind] = {"asset": stamp, "sha": fingerprint, "v": ASSET_LOG_VERSION}

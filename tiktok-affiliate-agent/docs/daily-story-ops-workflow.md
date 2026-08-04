@@ -108,7 +108,16 @@ outputs/YYYY-MM-DD/videos/<series-id>-ep3-tiktok.mp4
 
 renderer อ่านบีทของแต่ละตอนจาก `render_beats` ใน `data/story_series.json`
 series ที่ยังไม่มี `render_beats` จะถูกปฏิเสธพร้อมบอกให้เพิ่มก่อน ไม่ใช่เรนเดอร์ copy ของ series อื่นออกมา
-รอบที่ retention สั่งให้เปลี่ยน hook ให้ส่ง `--hook "ประโยคเปิดใหม่"` เข้าไปด้วย
+รอบที่ retention สั่งให้เปลี่ยน hook ให้ระบุตอนด้วย เพราะ hook ใหม่เป็นของตอนเดียว
+
+```bash
+python3 scripts/render_story_triplet_from_image.py \
+  --series-id <series-id> --episode 2 --hook "ประโยคเปิดใหม่" \
+  --image outputs/YYYY-MM-DD/<series-id>-keyvisual.png \
+  --out outputs/YYYY-MM-DD
+```
+
+ความยาวคลิปมาจากบีทสุดท้ายใน `render_beats` ของตอนนั้น ไม่ได้ตายตัวที่ 22 วินาที
 
 สถานะหลัง stage นี้:
 
