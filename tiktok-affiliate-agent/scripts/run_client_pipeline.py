@@ -264,7 +264,7 @@ def voice_duration_problem(scene: dict, asset: "Path | None", raw_bps: int = 0) 
     else:
         spoken = media_duration(asset)
     if spoken <= 0:
-        return ""
+        return "วัดความยาวไม่ได้ ไฟล์อาจเสียหรือเครื่องนี้ไม่มี ffprobe"
     if spoken - planned > max(1.0, planned * 0.2):
         return f"ยาวเกินซีนอยู่ {spoken - planned:.1f} วินาที"
     # A scene can end on silence, but a take covering almost none of it means the
@@ -963,14 +963,24 @@ def script_scene_fingerprint(script: dict) -> str:
 
 
 def read_source_log(job: Job) -> dict:
+    """The only record of what is stale. A damaged one must stop the run.
+
+    Resetting it silently would let every outdated artifact pass as current.
+    """
     log_path = job.path / "source-log.json"
     if not log_path.exists():
         return {}
     try:
         loaded = read_json(log_path)
-    except json.JSONDecodeError:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            f"`{log_path}` เสียหาย ({error})\n"
+            f"ไฟล์นี้เก็บสถานะว่าอะไรยังใหม่อยู่ ถ้ากู้จากที่สำรองไม่ได้ ให้ลบไฟล์นี้ทิ้ง\n"
+            f"แล้วรัน sync ใหม่ ระบบจะถือว่าไฟล์ทั้งหมดเป็นของปัจจุบัน จึงต้องตรวจเองว่าตรงกับ brief"
+        )
+    if not isinstance(loaded, dict):
+        raise SystemExit(f"`{log_path}` ต้องเป็น JSON object ให้ลบทิ้งแล้วรัน sync ใหม่")
+    return loaded
 
 
 def content_digest(path: Path) -> str:
@@ -991,7 +1001,7 @@ def derived_is_stale(job: Job, key: str, derived: Path, source_sha: str, stamp: 
     if entry and entry.get("v") != SOURCE_LOG_VERSION:
         # Only the export fingerprint changed recipe in this version, so its verdict
         # has to be carried. Every other entry can still compare its recorded hash.
-        if key == "final" or not entry.get("source_sha"):
+        if key.startswith("final") or not entry.get("source_sha"):
             carried = bool(entry.get("stale"))
         else:
             carried = entry["source_sha"] != source_sha
@@ -1049,7 +1059,7 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
         shot_id = str(shot.get("id") or "")
         record = log.get(shot_id) if isinstance(log.get(shot_id), dict) else {}
         still = checked_asset(job.stills_dir, shot_id, IMAGE_SUFFIXES, "image")
-        still_stamp = content_identity(still) if still else ""
+        still_stamp = content_digest(still) if still else ""
         for kind, directory, suffixes, fingerprint in (
             ("still", job.stills_dir, IMAGE_SUFFIXES, shot_image_fingerprint(shot, brief, rules)),
             ("clip", job.clips_dir, CLIP_SUFFIXES, shot_motion_fingerprint(shot, brief, still_stamp)),
@@ -1065,7 +1075,8 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
             if entry.get("v") in {4, 5} and entry.get("sha"):
                 # v5 stored `name:size:digest`; compare its digest with the file now.
                 previous = entry.get("asset", "")
-                same_bytes = entry.get("v") == 5 and previous.split(":", 1)[-1] == stamp
+                # v4 stamps carry no digest, so the recorded verdict has to stand.
+                same_bytes = entry.get("v") == 4 or previous.split(":", 1)[-1] == stamp
                 if same_bytes:
                     # Only the stamp representation changed: keep the fingerprint so a
                     # shot whose definition moved stays stale.
@@ -1427,6 +1438,11 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             )
     else:
         stages["voiceover"] = "blocked"
+        stale_lines = job.voice_dir / "lines.csv"
+        if stale_lines.exists():
+            # Following it would spend credits on a script that no longer exists.
+            stale_lines.unlink()
+            print("[note] ลบ `voiceover/lines.csv` เดิมทิ้ง เพราะยังไม่มีสคริปต์ที่ใช้ได้")
 
     # --- edit ---
     if shots and scenes:

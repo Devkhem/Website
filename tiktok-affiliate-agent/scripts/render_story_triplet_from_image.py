@@ -58,6 +58,7 @@ def load_episodes(story_path: str, series_id: str, hook: str = "", only_episode:
             first = beats[0]
             beats[0] = (first[0], first[1], hook, first[3])
         episodes.append({
+            "number": number,
             "id": f"{series['id']}-ep{number}",
             "title": item.get("title", ""),
             "beats": beats,
@@ -255,7 +256,9 @@ def prepare_bg(path: Path) -> Image.Image:
 
 
 def background(bg: Image.Image, sec: float, episode_index: int, beat_index: int, span: float = DEFAULT_CLIP_DURATION) -> Image.Image:
-    zoom_base = [1.0, 1.035, 1.065][episode_index]
+    # Cycle instead of indexing: a series may hold more than three episodes.
+    zoom_steps = [1.0, 1.035, 1.065]
+    zoom_base = zoom_steps[episode_index % len(zoom_steps)]
     zoom = zoom_base + 0.025 * (sec / span) + 0.012 * math.sin(sec * 0.45 + episode_index)
     resized = bg.resize((int(W * zoom), int(H * zoom)), Image.Resampling.LANCZOS)
     max_x = resized.width - W
@@ -306,7 +309,7 @@ def draw_frame(bg: Image.Image, episode: dict, episode_index: int, frame: int) -
     progress = int((W - 56) * sec / episode_duration(episode))
     rounded(draw, (28, 28, W - 28, 40), 6, (70, 75, 86, 185))
     rounded(draw, (28, 28, 28 + progress, 40), 6, RED)
-    draw.text((32, 58), f"{SERIES_TITLE} ตอน {episode_index + 1}", font=F22, fill=MUTED)
+    draw.text((32, 58), f"{SERIES_TITLE} ตอน {episode.get('number', episode_index + 1)}", font=F22, fill=MUTED)
     draw.text((W - 32, 58), HANDLE, font=F22, fill=MUTED, anchor="ra")
 
     if beat_index == 0:

@@ -446,13 +446,16 @@ def main() -> None:
     deciding_rows.sort(key=lambda row: (str(row.get("date") or ""), str(row.get("measured_at") or "")))
     ambiguous_metric = ""
     if len(deciding_rows) > 1:
-        top = deciding_rows[-1]
-        stamp = (str(top.get("date") or ""), str(top.get("measured_at") or ""))
-        tied = [row for row in deciding_rows if (str(row.get("date") or ""), str(row.get("measured_at") or "")) == stamp]
-        if len(tied) > 1:
+        top_date = str(deciding_rows[-1].get("date") or "")
+        same_day = [row for row in deciding_rows if str(row.get("date") or "") == top_date]
+        times = [str(row.get("measured_at") or "").strip() for row in same_day]
+        if len(same_day) > 1 and (len(set(times)) < len(times) or not all(times)):
+            # Either two identical stamps, or a row without a time: row order would
+            # decide, and row order is whatever the sheet was last sorted by.
             ambiguous_metric = (
-                f"มีผลวัด {len(tied)} แถวของ episode {latest_posted} ที่วันที่และเวลาเท่ากัน\n"
-                "เติมคอลัมน์ measured_at (เช่น 14:30) หรือลบแถวที่ซ้ำออก แล้วรันใหม่"
+                f"มีผลวัด {len(same_day)} แถวของ episode {latest_posted} ในวันที่ {top_date} "
+                f"ที่แยกไม่ออกว่าอันไหนใหม่กว่า\n"
+                "เติมคอลัมน์ measured_at (เช่น 14:30) ให้ครบทุกแถวของวันนั้น หรือลบแถวที่ซ้ำออก แล้วรันใหม่"
             )
     if ambiguous_metric:
         decision_key, decision = "indeterminate", "ยังตัดสินใจไม่ได้ เพราะผลวัดล่าสุดมีหลายแถวที่แยกไม่ออกว่าอันไหนใหม่กว่า"
