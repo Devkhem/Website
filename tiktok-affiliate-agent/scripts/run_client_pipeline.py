@@ -214,6 +214,23 @@ def decode_problem(path: Path, kind: str) -> str:
 
 _MEDIA_VERDICTS = {}
 _DURATIONS = {}
+_DECODE_RUNS = {}
+
+
+def full_decode_problem(path: Path) -> str:
+    """Play the file through ffmpeg, catching corrupt packets a probe cannot see."""
+    tool = shutil.which("ffmpeg")
+    if not tool:
+        return "ตรวจไฟล์เต็มรูปแบบไม่ได้เพราะเครื่องนี้ไม่มี ffmpeg"
+    key = (str(path), asset_stamp(path))
+    if key not in _DECODE_RUNS:
+        result = subprocess.run(
+            [tool, "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+        message = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else ""
+        _DECODE_RUNS[key] = "" if result.returncode == 0 and not message else (message or "ถอดรหัสไม่ผ่าน")
+    return _DECODE_RUNS[key]
 
 
 def media_duration(path: Path) -> float:
@@ -1090,6 +1107,9 @@ def export_problem(final_file: Path, brief: dict) -> str:
         return f"เสียงยาวแค่ {audio_seconds:g} วินาที จากคลิป {duration:g} วินาที คลิปเงียบเกือบทั้งเรื่อง"
     if duration and video_seconds and duration - video_seconds > max(1.5, duration * 0.1):
         return f"ภาพยาวแค่ {video_seconds:g} วินาที จากคลิป {duration:g} วินาที ภาพจบก่อนเสียง"
+    decode_issue = full_decode_problem(final_file)
+    if decode_issue:
+        return f"เล่นไฟล์จนจบไม่ได้: {decode_issue}"
     target = as_float(brief.get("duration_sec"), 0)
     if target:
         tolerance = max(3.0, target * 0.1)

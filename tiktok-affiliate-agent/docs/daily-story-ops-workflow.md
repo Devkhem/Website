@@ -176,6 +176,9 @@ data/story_metrics.csv
 date,series_id,episode,clip_id,posting_time,measured_after_hours,views,avg_watch_time_seconds,retention_percent,likes,comments,shares,saves,profile_visits,notes,next_action
 ```
 
+ถ้าวัดผลของตอนเดียวกันหลายครั้งในวันเดียว ให้เติมคอลัมน์ `measured_at` (เช่น 14:30) ด้วย
+ไม่งั้นระบบจะไม่รู้ว่าแถวไหนใหม่กว่าและจะไม่ตัดสินใจให้
+
 `measured_after_hours` ใส่ 2 หรือ 24 ตามรอบที่วัด เกณฑ์ตัดสินใจใช้แถวที่วัดตอน 2 ชั่วโมง
 ให้เพิ่มแถวใหม่ทุกรอบที่วัด อย่าเขียนทับแถวเดิม
 

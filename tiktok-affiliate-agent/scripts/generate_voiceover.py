@@ -344,9 +344,9 @@ def main(argv: "list | None" = None) -> None:
         elif existing and not args.overwrite:
             print(f"[skip] {scene_id} มีไฟล์อยู่แล้ว: {existing.name}")
             continue
-        pending.append((scene_id, text, output))
+        pending.append((scene_id, text, output, planned))
 
-    total_chars = sum(len(text) for _, text, _ in pending)
+    total_chars = sum(len(text) for _, text, _, _ in pending)
     print(f"งาน: {job_path}")
     print(f"ซีนที่ต้องอัด: {len(pending)} | ตัวอักษรรวม: {total_chars}")
     print(f"model: {settings.get('model_id', 'eleven_multilingual_v2')} | voice: {voice_id or '(ยังไม่ตั้งค่า)'}")
@@ -360,7 +360,7 @@ def main(argv: "list | None" = None) -> None:
 
     if not args.execute:
         print()
-        for scene_id, text, output in pending:
+        for scene_id, text, output, _planned in pending:
             preview = text if len(text) <= 60 else text[:57] + "..."
             print(f"[dry] {scene_id} -> {output.name}: {preview}")
         print()
@@ -374,7 +374,7 @@ def main(argv: "list | None" = None) -> None:
 
     failed = 0
     override_saved = False
-    for scene_id, text, output in pending:
+    for scene_id, text, output, planned in pending:
         try:
             audio = synthesize(text, voice_id, api_key, settings, args.timeout)
         except urllib.error.HTTPError as error:
@@ -393,6 +393,12 @@ def main(argv: "list | None" = None) -> None:
         if not looks_like_audio(staging, settings):
             staging.unlink(missing_ok=True)
             print(f"[fail] {scene_id}: ไฟล์ที่ได้กลับมาไม่ใช่เสียงที่ใช้ได้ ไม่ทับของเดิม")
+            failed += 1
+            continue
+        if not take_fits_scene(staging, planned, settings):
+            spoken = take_duration(staging, settings)
+            staging.unlink(missing_ok=True)
+            print(f"[fail] {scene_id}: เสียงที่ได้ยาว {spoken:.1f} วินาที ไม่พอดีกับซีน {planned:g} วินาที ไม่ทับของเดิม")
             failed += 1
             continue
         os.replace(staging, output)

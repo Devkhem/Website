@@ -230,7 +230,7 @@ def retention_rule_lines(config: dict) -> list:
     ]
 
 
-def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False, decision_key: str = "", wants_new_image: bool = True, unmappable: bool = False, awaiting_metric: bool = False, malformed_count: int = 0) -> str:
+def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False, decision_key: str = "", wants_new_image: bool = True, unmappable: bool = False, awaiting_metric: bool = False, malformed_count: int = 0, ambiguous_metric_text: str = "") -> str:
     handle = account.get("handle", "@thatslife6969")
     lines = [
         f"# Story Channel Plan: {plan_date}",
@@ -259,7 +259,9 @@ def render_markdown(account: dict, config: dict, series: dict, packages: list, d
     lines.extend(retention_rule_lines(config))
     lines.append("")
     if not packages:
-        if malformed_count:
+        if ambiguous_metric_text:
+            reason = ambiguous_metric_text
+        elif malformed_count:
             reason = (
                 f"metrics มี {malformed_count} แถวที่ไม่ได้ระบุ episode เป็นตัวเลข\n"
                 "แก้คอลัมน์ episode ให้ครบก่อน ไม่งั้นระบบจะนับว่ายังไม่เคยโพสต์"
@@ -440,18 +442,28 @@ def main() -> None:
     measured_at_two_hours = posted_episodes(metrics)
     awaiting_metric = bool(posted) and latest_posted not in measured_at_two_hours
     deciding_rows = [row for row in metrics if episode_number(row) == latest_posted] if latest_posted else list(metrics)
-    # Sheets get re-sorted; the newest measurement is the one with the latest date.
-    deciding_rows = sorted(
-        enumerate(deciding_rows),
-        key=lambda pair: (str(pair[1].get("date") or ""), pair[0]),
-    )
-    deciding_rows = [row for _, row in deciding_rows]
+    # Sheets get re-sorted, so order by the recorded observation, never by row order.
+    deciding_rows.sort(key=lambda row: (str(row.get("date") or ""), str(row.get("measured_at") or "")))
+    ambiguous_metric = ""
+    if len(deciding_rows) > 1:
+        top = deciding_rows[-1]
+        stamp = (str(top.get("date") or ""), str(top.get("measured_at") or ""))
+        tied = [row for row in deciding_rows if (str(row.get("date") or ""), str(row.get("measured_at") or "")) == stamp]
+        if len(tied) > 1:
+            ambiguous_metric = (
+                f"มีผลวัด {len(tied)} แถวของ episode {latest_posted} ที่วันที่และเวลาเท่ากัน\n"
+                "เติมคอลัมน์ measured_at (เช่น 14:30) หรือลบแถวที่ซ้ำออก แล้วรันใหม่"
+            )
     decision_key, decision = decision_from_metrics(config, deciding_rows)
     target_episode = latest_posted or latest_episode_number(deciding_rows)
     exhausted = decision_key != "kill" and not [
         item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
     ]
-    episodes = [] if (awaiting_metric or malformed_rows) else select_episodes(series, decision_key, posted, target_episode)
+    episodes = (
+        []
+        if (awaiting_metric or malformed_rows or ambiguous_metric)
+        else select_episodes(series, decision_key, posted, target_episode)
+    )
     unmappable = decision_key == "rewrite_hook" and not episodes
     needs_hook = decision_key == "rewrite_hook" and not unmappable and not args.hook.strip()
     if needs_hook:
@@ -487,7 +499,7 @@ def main() -> None:
     (output_dir / "story-channel-plan.md").write_text(
         render_markdown(
             account, config, series, packages, decision, args.date, exhausted, needs_hook,
-            decision_key, wants_new_image, unmappable, awaiting_metric, len(malformed_rows),
+            decision_key, wants_new_image, unmappable, awaiting_metric, len(malformed_rows), ambiguous_metric,
         ),
         encoding="utf-8",
     )
@@ -501,7 +513,9 @@ def main() -> None:
     print(f"Created {output_dir / 'story-channel-plan.md'}")
     print(f"Created {output_dir / 'story_posting_queue.csv'}")
     print(f"Decision: {decision}")
-    if malformed_rows:
+    if ambiguous_metric:
+        print(f"ไม่ได้สร้าง episode package เพราะ {ambiguous_metric.splitlines()[0]}")
+    elif malformed_rows:
         print(f"ไม่ได้สร้าง episode package เพราะ metrics มี {len(malformed_rows)} แถวที่ไม่ได้ระบุ episode เป็นตัวเลข")
     elif awaiting_metric:
         print("ไม่ได้สร้าง episode package เพราะยังไม่มี retention ที่วัดตอน 2 ชั่วโมงของตอนที่โพสต์ไปแล้ว")
