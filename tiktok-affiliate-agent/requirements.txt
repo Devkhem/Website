@@ -1,0 +1,7 @@
+# ต้องใช้ Pillow สำหรับ
+#   scripts/prepare_api_image.py           แปลงภาพให้ API รับได้
+#   scripts/render_story_triplet_from_image.py  เรนเดอร์คลิป
+#   scripts/run_client_pipeline.py         ตรวจว่าไฟล์ภาพเปิดได้จริงก่อนนับว่าเสร็จ
+# ส่วน run_daily_plan และ run_story_channel_plan ใช้ไลบรารีมาตรฐานล้วน
+# นอกจากนี้ต้องมี ffmpeg/ffprobe ในเครื่องสำหรับตรวจไฟล์คลิป เสียง และไฟล์ final
+Pillow>=10.0

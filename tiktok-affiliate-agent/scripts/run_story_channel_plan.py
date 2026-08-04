@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+"""Create a daily story-channel plan from one AI image into three TikTok clips."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import re
+from datetime import date
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Create a 1-image -> 3-clips TikTok story plan.")
+    parser.add_argument("--date", default=date.today().isoformat(), help="Plan date in YYYY-MM-DD format.")
+    parser.add_argument("--series-id", default="", help="Story series id, e.g. room-407.")
+    parser.add_argument("--story", default=str(ROOT / "data" / "story_series.json"), help="Story config JSON.")
+    parser.add_argument("--account", default=str(ROOT / "data" / "tiktok_account.json"), help="TikTok account JSON.")
+    parser.add_argument("--metrics", default=str(ROOT / "data" / "story_metrics.csv"), help="Story metrics CSV.")
+    parser.add_argument("--out", default=str(ROOT / "outputs"), help="Output directory.")
+    parser.add_argument("--hook", default="", help="hook ใหม่สำหรับรอบที่ retention สั่งให้เปลี่ยน hook.")
+    return parser.parse_args()
+
+
+def read_json(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def read_series_rows(path: Path, series_id: str) -> list:
+    """Every row for this series, whatever horizon — this is the posting history."""
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return [row for row in csv.DictReader(handle) if row.get("series_id") == series_id]
+
+
+def read_latest_metrics(path: Path, series_id: str) -> list:
+    """Rows for this series that carry a retention number.
+
+    The rules are written in terms of two-hour retention, so prefer rows measured at
+    two hours; older files without the column fall back to every row.
+    """
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    kept = []
+    for row in rows:
+        if row.get("series_id") != series_id or not str(row.get("retention_percent") or "").strip():
+            continue
+        value = parse_float(row.get("retention_percent"), None)
+        if value is None or not math.isfinite(value) or not 0 <= value <= 100:
+            print(f"[warn] ข้าม metrics แถวที่ retention_percent ใช้ไม่ได้ (ต้องเป็น 0-100): {row.get('retention_percent')!r}")
+            continue
+        kept.append(row)
+    rows = kept
+    two_hour = [row for row in rows if str(row.get("measured_after_hours") or "").strip() == "2"]
+    if two_hour:
+        return two_hour
+    if rows and any("measured_after_hours" in row for row in rows):
+        # The column exists, so a missing 2h row is missing data — not a reason to
+        # judge 24h numbers against thresholds named for two hours.
+        print("[warn] ยังไม่มีแถวที่วัดตอน 2 ชั่วโมง จึงยังไม่ตัดสินใจจาก retention รอบนี้")
+        return []
+    return rows
+
+
+def select_series(config: dict, requested_id: str) -> dict:
+    series = config.get("series", [])
+    if requested_id:
+        for item in series:
+            if item.get("id") == requested_id:
+                return item
+        raise SystemExit(f"Series id not found: {requested_id}")
+    return series[0] if series else {}
+
+
+def retention_thresholds(config: dict) -> tuple:
+    """kill <= rewrite <= strong, all real percentages, or the run stops."""
+    rules = config.get("retention_rules", {})
+    strong = parse_float(rules.get("strong_continue", {}).get("two_hour_retention_percent"), 35)
+    rewrite = parse_float(rules.get("rewrite_hook", {}).get("two_hour_retention_percent"), 25)
+    kill = parse_float(rules.get("kill_premise", {}).get("two_hour_retention_percent"), 20)
+    for name, value in (("kill_premise", kill), ("rewrite_hook", rewrite), ("strong_continue", strong)):
+        if value is None or not math.isfinite(value) or not 0 <= value <= 100:
+            raise SystemExit(f"retention_rules.{name} ต้องเป็นตัวเลข 0-100 แต่ได้: {value}")
+    if not kill <= rewrite <= strong:
+        raise SystemExit(
+            f"retention_rules ต้องเรียง kill <= rewrite <= strong แต่ได้ {kill:g} / {rewrite:g} / {strong:g}"
+        )
+    return kill, rewrite, strong
+
+
+def decision_from_metrics(config: dict, metrics: list) -> tuple:
+    """Return (key, ข้อความอธิบาย) so the plan and the packages agree."""
+    if not metrics:
+        return "no_data", "ยังไม่มี retention ให้เตรียม 3 ตอน แต่โพสต์ตอนแรกก่อน แล้ววัด retention ที่ 2 ชั่วโมง"
+    latest = metrics[-1]
+    retention = parse_float(latest.get("retention_percent"))
+    kill, rewrite, strong = retention_thresholds(config)
+    if retention >= strong:
+        return "continue", "Retention แข็งแรง: ทำตอนต่อจาก premise เดิมทันที"
+    if retention >= rewrite:
+        return "rewrite_hook", "Retention กลาง: ใช้ภาพเดิมได้ แต่ต้องเปลี่ยน hook 3 วินาทีแรก"
+    if retention < kill:
+        return "kill", "Retention ต่ำ: หยุด premise นี้และเปลี่ยน location/premise"
+    return "test_more", "Retention ยังพอทดสอบได้: ทำอีก 1 variation ก่อนตัดสินใจ"
+
+
+def episode_number(row: dict) -> int:
+    try:
+        return int(str(row.get("episode") or "").strip())
+    except ValueError:
+        return 0
+
+
+def posted_episodes(metrics: list) -> set:
+    return {number for number in (episode_number(row) for row in metrics) if number}
+
+
+def latest_episode_number(metrics: list) -> int:
+    """The episode behind the deciding row only — never an older row's number."""
+    if not metrics:
+        return 0
+    try:
+        return int(str(metrics[-1].get("episode") or "").strip())
+    except ValueError:
+        return 0
+
+
+def select_episodes(series: dict, decision_key: str, posted: set, target_episode: int = 0) -> list:
+    """Turn the retention decision into the episodes this run should package."""
+    episodes = series.get("episodes", [])
+    if decision_key == "kill":
+        return []
+    if decision_key == "rewrite_hook":
+        # Only the episode the deciding metric points at; guessing would rewrite the
+        # wrong hook and make the experiment meaningless.
+        exact = [item for item in episodes if int(item.get("episode", 0)) == target_episode]
+        return exact[:1]
+    fresh = [item for item in episodes if int(item.get("episode", 0)) not in posted]
+    if not fresh:
+        # Everything configured has been posted; repeating it would queue old content.
+        return []
+    if decision_key == "test_more":
+        # The decision literally says "one more variation before deciding".
+        return fresh[:1]
+    return fresh[:3]
+
+
+def parse_float(value, default=0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def build_image_prompt(series: dict) -> str:
+    seed = series.get("image_prompt_seed", "")
+    return "\n".join(
+        [
+            "สร้างภาพแนวตั้ง 9:16 แบบภาพถ่ายมือถือจริง ไม่ใช่โปสเตอร์หนัง",
+            seed,
+            "ให้มีพื้นที่มืดหรือ negative space สำหรับใส่ subtitle ด้านบนหรือด้านล่าง",
+            "ความน่ากลัวต้องมาจากรายละเอียดเล็ก ๆ ที่คนต้องมองซ้ำ",
+            "ห้ามมีตัวหนังสือ ห้ามมี watermark ห้ามมี logo",
+            "ห้ามให้เห็นผีชัด ๆ ห้ามหน้าผีใหญ่ ห้ามเลือด ห้าม gore",
+        ]
+    )
+
+
+def episode_package(series: dict, episode: dict, posting_time: str, decision_key: str = "no_data", new_hook: str = "") -> dict:
+    title = episode.get("title", "")
+    hook = episode.get("hook", "")
+    if decision_key == "rewrite_hook" and new_hook:
+        hook = new_hook
+    twist = episode.get("twist", "")
+    series_title = series.get("title", "")
+    configured = next(
+        (
+            str(item.get("caption") or "")
+            for item in series.get("render_beats", [])
+            if int(item.get("episode", 0)) == int(episode.get("episode", 0))
+        ),
+        "",
+    )
+    # The renderer prints the configured caption beside the MP4, so the queue uses it too.
+    caption = configured or f"{hook} ฟังให้จบแล้วบอกทีว่าคุณจะเปิดไหม"
+    hashtags = "#เรื่องผี #เล่าเรื่องผี #เรื่องหลอนก่อนนอน #TikTokThailand #หลอน"
+    script = "\n".join(
+        [
+            f"0-2s: {hook}",
+            f"2-8s: เล่าว่าสถานที่คือ {series.get('location', 'สถานที่เกิดเรื่อง')} และมีบางอย่างผิดปกติ",
+            f"8-18s: เพิ่มหลักฐานจาก {series.get('fear_mechanic', 'สิ่งที่อธิบายไม่ได้')}",
+            f"18-28s: เผย twist: {twist}",
+            "28-32s: ปิดด้วยคำถามให้คอมเมนต์",
+        ]
+    )
+    edit_notes = "\n".join(
+        (["ต้องเขียน hook 3 วินาทีแรกใหม่ ห้ามใช้ hook เดิมซ้ำ"] if decision_key == "rewrite_hook" else [])
+        + [
+            "ใช้ภาพแม่ภาพเดียว",
+            "เริ่มด้วย crop ใกล้จุดผิดปกติ แล้วค่อย zoom out",
+            "ใส่ subtitle สั้น ไม่เกิน 2 บรรทัดต่อ beat",
+            "ใช้เสียง low drone + knock หรือ phone vibration",
+            "จบด้วย frame ค้าง 0.8 วินาทีให้คนอ่านทัน",
+        ]
+    )
+    return {
+        "series_id": series.get("id", ""),
+        "series_title": series_title,
+        "episode": str(episode.get("episode", "")),
+        "clip_id": f"{series.get('id', 'story')}-ep{episode.get('episode', '')}",
+        "title": title,
+        "hook": hook,
+        "twist": twist,
+        "posting_time": posting_time,
+        "caption": caption,
+        "hashtags": hashtags,
+        "script": script,
+        "edit_notes": edit_notes,
+    }
+
+
+def retention_rule_lines(config: dict) -> list:
+    """Rules straight from the config that made the decision, not a copy of it."""
+    kill, rewrite, strong = retention_thresholds(config)
+    return [
+        f"- retention (วัดที่ 2 ชั่วโมง) ต่ำกว่า {kill:g}% ให้หยุด premise",
+        f"- {rewrite:g}% ถึงต่ำกว่า {strong:g}% ให้ใช้ภาพเดิมแต่เปลี่ยน hook",
+        f"- {strong:g}% ขึ้นไป ให้ทำตอนต่อทันที",
+        f"- ระหว่าง {kill:g}% ถึงต่ำกว่า {rewrite:g}% ให้ทำอีก 1 variation ก่อนตัดสินใจ",
+    ]
+
+
+def render_markdown(account: dict, config: dict, series: dict, packages: list, decision: str, plan_date: str, decision_exhausted: bool = False, needs_hook: bool = False, decision_key: str = "", wants_new_image: bool = True, unmappable: bool = False, awaiting_metric: bool = False, malformed_count: int = 0, ambiguous_metric_text: str = "") -> str:
+    handle = account.get("handle", "@thatslife6969")
+    lines = [
+        f"# Story Channel Plan: {plan_date}",
+        "",
+        f"TikTok account: {handle}",
+        f"Workflow: {config.get('primary_format', 'ChatGPT image -> Codex 3 clips')}",
+        f"Series: {series.get('title', '')} (`{series.get('id', '')}`)",
+        f"Decision: {decision}",
+        "",
+        "## ChatGPT Image Prompt",
+        "",
+        "```text",
+        build_image_prompt(series)
+        if wants_new_image
+        else (
+            "(ใช้ภาพแม่เดิมของ series นี้ ไม่ต้องสร้างภาพใหม่)"
+            if packages
+            else "(ไม่ออก prompt ภาพ เพราะรอบนี้ยังไม่ทำ premise นี้ต่อ)"
+        ),
+        "```",
+        "",
+        "## Production Rule",
+        "",
+        "- ใช้ภาพนี้ภาพเดียวให้ครบ 3 คลิปก่อนสร้างภาพใหม่",
+    ]
+    lines.extend(retention_rule_lines(config))
+    lines.append("")
+    if not packages:
+        if ambiguous_metric_text:
+            reason = ambiguous_metric_text
+        elif malformed_count:
+            reason = (
+                f"metrics มี {malformed_count} แถวที่ไม่ได้ระบุ episode เป็นตัวเลข\n"
+                "แก้คอลัมน์ episode ให้ครบก่อน ไม่งั้นระบบจะนับว่ายังไม่เคยโพสต์"
+            )
+        elif awaiting_metric:
+            reason = (
+                "โพสต์ไปแล้วแต่ยังไม่มี retention ที่วัดตอน 2 ชั่วโมง\n"
+                "กรอกผลที่ measured_after_hours = 2 ก่อน แล้วค่อยรันใหม่"
+            )
+        elif unmappable:
+            reason = (
+                "retention บอกให้เปลี่ยน hook แต่แถวที่ใช้ตัดสินไม่ได้ระบุ episode ที่มีอยู่จริง\n"
+                "ให้แก้คอลัมน์ episode ใน metrics ให้ตรงกับ data/story_series.json ก่อน"
+            )
+        elif needs_hook:
+            reason = (
+                "retention บอกให้เปลี่ยน hook แต่ยังไม่ได้ระบุ hook ใหม่\n"
+                "เขียน hook ใหม่แล้วรันซ้ำ เช่น --hook \"ประโยคเปิดใหม่ 3 วินาทีแรก\""
+            )
+        elif decision_exhausted:
+            reason = "ตอนทั้งหมดใน series นี้ถูกโพสต์ไปหมดแล้ว ต้องเขียน episode ใหม่ก่อน"
+        else:
+            reason = "retention ต่ำกว่าเกณฑ์ kill จึงไม่ออก episode package ให้รอบนี้"
+        lines.extend(
+            [
+                "## ยังไม่ออก package รอบนี้",
+                "",
+                reason,
+                "ให้เลือก series อื่นด้วย --series-id หรือเพิ่ม episode ใหม่ใน data/story_series.json",
+                "",
+            ]
+        )
+    for package in packages:
+        lines.extend(
+            [
+                f"## Episode {package['episode']}: {package['title']}",
+                "",
+                f"Clip ID: `{package['clip_id']}`",
+                f"Posting time: {package['posting_time']}",
+                "",
+                "### Hook",
+                "",
+                package["hook"],
+                "",
+                "### Script",
+                "",
+                package["script"],
+                "",
+                "### Edit Notes",
+                "",
+                package["edit_notes"],
+                "",
+                "### Caption",
+                "",
+                package["caption"],
+                "",
+                "### Hashtags",
+                "",
+                package["hashtags"],
+                "",
+            ]
+        )
+    if len(packages) > 1:
+        lines.extend(
+            [
+                "## ลำดับการโพสต์",
+                "",
+                "โพสต์เฉพาะตอนที่ `post_status` เป็น `post_now` ก่อน แล้ววัด retention ที่ 2 ชั่วโมง",
+                "ตอนที่เหลือเตรียมไว้ก่อน อย่าเพิ่งโพสต์จนกว่าจะรู้ผล",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## After Posting",
+            "",
+            "กรอกผลใน `data/story_metrics.csv` หลังโพสต์ 2 ชั่วโมงและ 24 ชั่วโมง:",
+            "",
+            "- views",
+            "- avg_watch_time_seconds",
+            "- retention_percent",
+            "- comments",
+            "- shares",
+            "- saves",
+            "- next_action",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_queue(path: Path, packages: list[dict[str, str]]) -> None:
+    fields = ["series_id", "episode", "clip_id", "title", "hook", "posting_time", "post_status", "caption", "hashtags"]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for index, package in enumerate(packages):
+            row = {field: package.get(field, "") for field in fields}
+            # The ops gate is: post one, wait two hours, read retention, then decide.
+            row["post_status"] = "post_now" if index == 0 else "hold_until_retention"
+            writer.writerow(row)
+
+
+def write_episode_packages(output_dir: Path, packages: list) -> None:
+    # A rerun can select different episodes, so clear the previous ones first;
+    # otherwise a killed premise leaves packages that still look actionable.
+    for stale in sorted(output_dir.glob("episode-*-package.md")):
+        stale.unlink()
+    for package in packages:
+        path = output_dir / f"episode-{int(package['episode']):02d}-package.md"
+        path.write_text(render_episode_package(package), encoding="utf-8")
+
+
+def render_episode_package(package: dict[str, str]) -> str:
+    return "\n".join(
+        [
+            f"# {package['clip_id']}",
+            "",
+            f"Title: {package['title']}",
+            f"Posting time: {package['posting_time']}",
+            "",
+            "## Hook",
+            "",
+            package["hook"],
+            "",
+            "## Script",
+            "",
+            package["script"],
+            "",
+            "## Edit Notes",
+            "",
+            package["edit_notes"],
+            "",
+            "## Caption",
+            "",
+            package["caption"],
+            "",
+            "## Hashtags",
+            "",
+            package["hashtags"],
+            "",
+        ]
+    )
+
+
+def validate_date(value: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
+        raise SystemExit(f"--date ต้องเป็นรูปแบบ YYYY-MM-DD เท่านั้น แต่ได้: {value}")
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise SystemExit(f"--date ไม่ใช่วันที่ที่มีอยู่จริง: {value}")
+    return value
+
+
+def main() -> None:
+    args = parse_args()
+    args.date = validate_date(args.date)
+    config = read_json(Path(args.story))
+    retention_thresholds(config)
+    account = read_json(Path(args.account))
+    series = select_series(config, args.series_id)
+    metrics = read_latest_metrics(Path(args.metrics), series.get("id", ""))
+    history = read_series_rows(Path(args.metrics), series.get("id", ""))
+    known = {int(item.get("episode", 0)) for item in series.get("episodes", [])}
+    # A metrics row for an episode this series does not have cannot decide anything.
+    unknown_rows = posted_episodes(history) - known
+    if unknown_rows:
+        print(f"[warn] ข้าม metrics ของ episode ที่ไม่มีใน series: {', '.join(str(n) for n in sorted(unknown_rows))}")
+    # A row with no usable episode number would silently look like "never posted".
+    malformed_rows = [row for row in history if not episode_number(row)]
+    metrics = [row for row in metrics if episode_number(row) in known]
+    posted = posted_episodes(history) & known
+    posting_windows = config.get("posting_windows") or ["12:00", "18:30", "22:30"]
+    # The gate and the decision both follow the newest posted episode, whatever
+    # order the spreadsheet happens to be in.
+    latest_posted = max(posted) if posted else 0
+    measured_at_two_hours = posted_episodes(metrics)
+    awaiting_metric = bool(posted) and latest_posted not in measured_at_two_hours
+    deciding_rows = [row for row in metrics if episode_number(row) == latest_posted] if latest_posted else list(metrics)
+    # Sheets get re-sorted, so order by the recorded observation, never by row order.
+    deciding_rows.sort(key=lambda row: (str(row.get("date") or ""), str(row.get("measured_at") or "")))
+    ambiguous_metric = ""
+    if len(deciding_rows) > 1:
+        top_date = str(deciding_rows[-1].get("date") or "")
+        same_day = [row for row in deciding_rows if str(row.get("date") or "") == top_date]
+        times = [str(row.get("measured_at") or "").strip() for row in same_day]
+        if len(same_day) > 1 and (len(set(times)) < len(times) or not all(times)):
+            # Either two identical stamps, or a row without a time: row order would
+            # decide, and row order is whatever the sheet was last sorted by.
+            ambiguous_metric = (
+                f"มีผลวัด {len(same_day)} แถวของ episode {latest_posted} ในวันที่ {top_date} "
+                f"ที่แยกไม่ออกว่าอันไหนใหม่กว่า\n"
+                "เติมคอลัมน์ measured_at (เช่น 14:30) ให้ครบทุกแถวของวันนั้น หรือลบแถวที่ซ้ำออก แล้วรันใหม่"
+            )
+    if ambiguous_metric:
+        decision_key, decision = "indeterminate", "ยังตัดสินใจไม่ได้ เพราะผลวัดล่าสุดมีหลายแถวที่แยกไม่ออกว่าอันไหนใหม่กว่า"
+    else:
+        decision_key, decision = decision_from_metrics(config, deciding_rows)
+    target_episode = latest_posted or latest_episode_number(deciding_rows)
+    exhausted = decision_key != "kill" and not [
+        item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
+    ]
+    episodes = (
+        []
+        if (awaiting_metric or malformed_rows or ambiguous_metric)
+        else select_episodes(series, decision_key, posted, target_episode)
+    )
+    unmappable = decision_key == "rewrite_hook" and not episodes
+    needs_hook = decision_key == "rewrite_hook" and not unmappable and not args.hook.strip()
+    if needs_hook:
+        # Emitting the old hook again would repeat the test we just failed.
+        episodes = []
+    # The window belongs to the episode's place in the series, so a rerun that
+    # releases episode 2 keeps its 18:30 slot instead of taking episode 1's noon.
+    all_episodes = series.get("episodes", [])
+    positions = {int(item.get("episode", 0)): index for index, item in enumerate(all_episodes)}
+    packages = [
+        episode_package(
+            series,
+            episode,
+            posting_windows[positions.get(int(episode.get("episode", 0)), index) % len(posting_windows)],
+            decision_key,
+            args.hook.strip(),
+        )
+        for index, episode in enumerate(episodes)
+    ]
+    # One mother image serves the whole series: only a premise with nothing posted yet
+    # needs a new one. An image with no package to make would be wasted outright.
+    wants_new_image = bool(packages) and decision_key not in {"kill", "rewrite_hook"} and not posted
+
+    output_dir = Path(args.out) / args.date
+    output_dir.mkdir(parents=True, exist_ok=True)
+    image_prompt_path = output_dir / "chatgpt-image-prompt.txt"
+    if wants_new_image:
+        image_prompt_path.write_text(build_image_prompt(series), encoding="utf-8")
+    elif image_prompt_path.exists():
+        # Following it would spend the daily image on a premise we stopped, or on a
+        # round that is meant to change only the hook.
+        image_prompt_path.unlink()
+    (output_dir / "story-channel-plan.md").write_text(
+        render_markdown(
+            account, config, series, packages, decision, args.date, exhausted, needs_hook,
+            decision_key, wants_new_image, unmappable, awaiting_metric, len(malformed_rows), ambiguous_metric,
+        ),
+        encoding="utf-8",
+    )
+    write_queue(output_dir / "story_posting_queue.csv", packages)
+    write_episode_packages(output_dir, packages)
+
+    if wants_new_image:
+        print(f"Created {image_prompt_path}")
+    elif packages:
+        print("ใช้ภาพแม่เดิม ไม่ออก prompt ภาพใหม่")
+    print(f"Created {output_dir / 'story-channel-plan.md'}")
+    print(f"Created {output_dir / 'story_posting_queue.csv'}")
+    print(f"Decision: {decision}")
+    if ambiguous_metric:
+        print(f"ไม่ได้สร้าง episode package เพราะ {ambiguous_metric.splitlines()[0]}")
+    elif malformed_rows:
+        print(f"ไม่ได้สร้าง episode package เพราะ metrics มี {len(malformed_rows)} แถวที่ไม่ได้ระบุ episode เป็นตัวเลข")
+    elif awaiting_metric:
+        print("ไม่ได้สร้าง episode package เพราะยังไม่มี retention ที่วัดตอน 2 ชั่วโมงของตอนที่โพสต์ไปแล้ว")
+    elif unmappable:
+        print(f"ไม่ได้สร้าง episode package เพราะ metrics ชี้ไป episode {target_episode or '(ว่าง)'} ที่ไม่มีใน series")
+    elif needs_hook:
+        print("ไม่ได้สร้าง episode package เพราะยังไม่ได้ระบุ hook ใหม่ ให้รันซ้ำพร้อม --hook")
+    elif not packages and exhausted:
+        print("ไม่ได้สร้าง episode package เพราะตอนทั้งหมดใน series นี้ถูกโพสต์ไปหมดแล้ว")
+    elif not packages:
+        print("ไม่ได้สร้าง episode package เพราะ retention ต่ำกว่าเกณฑ์ kill")
+    elif posted:
+        print(f"ตอนที่โพสต์ไปแล้ว: {', '.join(str(number) for number in sorted(posted))}")
+
+
+if __name__ == "__main__":
+    main()
