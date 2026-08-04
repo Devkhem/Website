@@ -215,7 +215,8 @@ def take_fits_scene(path: Path, planned: float, settings: dict) -> bool:
         return True
     spoken = take_duration(path, settings)
     if spoken <= 0:
-        return True
+        # A scene with a planned length needs a measurable take; unknown is not "fine".
+        return False
     if spoken - planned > max(1.0, planned * 0.2):
         return False
     return spoken >= max(1.0, planned * 0.4)

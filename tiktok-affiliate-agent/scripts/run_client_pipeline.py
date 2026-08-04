@@ -62,7 +62,7 @@ AUDIO_SUFFIXES = [".mp3", ".wav", ".m4a", ".ulaw", ".opus", ".pcm", ".alaw"]
 # ElevenLabs output_format prefix -> the extension its bytes actually deserve.
 AUDIO_FORMAT_SUFFIXES = {"mp3": ".mp3", "pcm": ".pcm", "ulaw": ".ulaw", "alaw": ".alaw", "opus": ".opus"}
 FINAL_SUFFIXES = [".mp4", ".mov"]
-ASSET_LOG_VERSION = 5
+ASSET_LOG_VERSION = 6
 # Bump when a prompt template changes, so existing jobs adopt the new fingerprint
 # instead of being told their script is stale by a tool update.
 SOURCE_LOG_VERSION = 4
@@ -1055,9 +1055,9 @@ def track_shot_assets(job: Job, shots: list, brief: dict, rules: dict) -> dict:
                 # mistaken for a fresh asset and clear a stale verdict.
                 result["missing_" + kind + "s"].append(shot_id)
                 continue
-            stamp = content_identity(asset)
+            stamp = content_digest(asset)
             entry = record.get(kind) if isinstance(record.get(kind), dict) else {}
-            if entry.get("v") == 4 and entry.get("sha"):
+            if entry.get("v") in {4, 5} and entry.get("sha"):
                 # Only the stamp representation changed: keep the recorded fingerprint
                 # so a shot whose definition moved stays stale.
                 entry = {"asset": stamp, "sha": entry["sha"], "v": ASSET_LOG_VERSION}
@@ -1147,6 +1147,22 @@ def content_identity(path: Path) -> str:
         return f"{path.name}:unreadable"
     digest = hashlib.sha1(head + tail).hexdigest()[:16]
     return f"{path.name}:{size}:{digest}"
+
+
+def migrate_final_entry(job: Job, digest: str) -> None:
+    """Move a legacy single `final` entry onto the per-export key it describes.
+
+    Keying by content means each cut keeps its own verdict, so selecting an older
+    file cannot inherit a fresh one.
+    """
+    log = read_source_log(job)
+    legacy = log.get("final")
+    if not isinstance(legacy, dict):
+        return
+    if legacy.get("stamp") == digest and f"final:{digest}" not in log:
+        log[f"final:{digest}"] = legacy
+    log.pop("final", None)
+    write_json(job.path / "source-log.json", log)
 
 
 def export_inputs_fingerprint(job: Job, shots: list = (), scenes: list = ()) -> str:
@@ -1430,9 +1446,13 @@ def sync_job(job: Job, fields_config: dict, fields_path: str = "") -> dict:
             and stages["animate"] == "done"
             and stages["voiceover"] == "done"
         )
-        stale_export = bool(final_file) and derived_is_stale(
-            job, "final", final_file, export_inputs_fingerprint(job, shots, scenes), content_digest(final_file)
-        )
+        stale_export = False
+        if final_file:
+            digest = content_digest(final_file)
+            migrate_final_entry(job, digest)
+            stale_export = derived_is_stale(
+                job, f"final:{digest}", final_file, export_inputs_fingerprint(job, shots, scenes), digest
+            )
         broken_export = export_problem(final_file, brief) if (final_file and not stale_export) else ""
         if broken_export:
             print(f"[note] `final/{final_file.name}` {broken_export} ต้อง export ใหม่")

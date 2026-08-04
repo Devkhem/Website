@@ -93,6 +93,7 @@ outputs/YYYY-MM-DD/<series-id>-keyvisual.png
 ```bash
 python3 -m pip install -r requirements.txt   # ครั้งแรกครั้งเดียว renderer ต้องใช้ Pillow และเครื่องต้องมี ffmpeg
 python3 scripts/render_story_triplet_from_image.py \
+  --series-id <series-id> \
   --image outputs/YYYY-MM-DD/<series-id>-keyvisual.png \
   --out outputs/YYYY-MM-DD
 ```
@@ -105,7 +106,9 @@ outputs/YYYY-MM-DD/videos/<series-id>-ep2-tiktok.mp4
 outputs/YYYY-MM-DD/videos/<series-id>-ep3-tiktok.mp4
 ```
 
-หมายเหตุ: ตอนนี้ renderer ยัง hard-code copy ของ `room-407` อยู่ ถ้าจะใช้ premise ใหม่จริง เช่น `laundry-24` ต้องปรับ script text/episodes ให้ตรง premise ก่อน render
+renderer อ่านบีทของแต่ละตอนจาก `render_beats` ใน `data/story_series.json`
+series ที่ยังไม่มี `render_beats` จะถูกปฏิเสธพร้อมบอกให้เพิ่มก่อน ไม่ใช่เรนเดอร์ copy ของ series อื่นออกมา
+รอบที่ retention สั่งให้เปลี่ยน hook ให้ส่ง `--hook "ประโยคเปิดใหม่"` เข้าไปด้วย
 
 สถานะหลัง stage นี้:
 

@@ -30,54 +30,45 @@ BLACK = "#050507"
 GREEN = "#91ffc2"
 
 
-EPISODES = [
-    {
-        "id": "room-407-ep1",
-        "title": "เสียงเคาะตอนตี 3",
-        "beats": [
-            (0.0, 2.6, "อย่าเปิดประตู\nหลังตี 3", "ฟังให้จบก่อนนอน"),
-            (2.6, 6.4, "คืนนั้นผมนอน\nห้อง 407 คนเดียว", "ทั้งชั้นเงียบผิดปกติ"),
-            (6.4, 10.8, "ก๊อก... ก๊อก... ก๊อก...", "เสียงมาจากหน้าประตู"),
-            (10.8, 15.8, "ผมเปิดตาแมว", "หน้าห้องไม่มีใคร"),
-            (15.8, 20.0, "แต่โทรศัพท์เด้งขึ้นมา", "“เปิดหน่อย หนาวมาก”"),
-            (20.0, 22.0, "ถ้าเป็นคุณ", "จะเปิดไหม?"),
-        ],
-        "phone_beats": [4],
-        "phone_context": ("ไม่ทราบชื่อ", "อยู่ห้อง 407 ใช่ไหม"),
-        "caption": "อย่าเปิดประตูหลังตี 3 ฟังให้จบแล้วบอกทีว่าคุณจะเปิดไหม",
-    },
-    {
-        "id": "room-407-ep2",
-        "title": "ข้อความจากรูมเมตเก่า",
-        "beats": [
-            (0.0, 2.6, "เบอร์ที่ปิดไปแล้ว\nส่งข้อความมา", "03:07"),
-            (2.6, 6.8, "ข้อความแรกเขียนว่า", "“คุณอยู่คนเดียวใช่ไหม”"),
-            (6.8, 11.2, "ผมจำเบอร์นั้นได้", "รูมเมตที่ย้ายออกไปเมื่อปีก่อน"),
-            (11.2, 16.4, "ข้อความต่อมา", "“อย่ามองตาแมว”"),
-            (16.4, 20.0, "แต่ผมมองไปแล้ว", "ในเงาประตูมีคนยืนอยู่"),
-            (20.0, 22.0, "แล้วแชตสุดท้ายก็ขึ้น", "“เขาเห็นคุณแล้ว”"),
-        ],
-        "phone_beats": [1, 3, 5],
-        "phone_context": ("รูมเมตเก่า", "คุณอยู่คนเดียวใช่ไหม"),
-        "caption": "เบอร์ที่ปิดไปแล้ว ส่งข้อความมา ถ้าเจอแบบนี้คุณจะทำยังไง",
-    },
-    {
-        "id": "room-407-ep3",
-        "title": "เงาในกระจก",
-        "beats": [
-            (0.0, 2.8, "ผมไม่เห็นใคร\nหน้าห้อง", "แต่กระจกเห็น"),
-            (2.8, 7.0, "ปลายทางเดินมีเงา", "ยืนนิ่งอยู่ในกรอบกระจก"),
-            (7.0, 11.4, "ผมหันกลับไปดู", "ทางเดินว่างเปล่า"),
-            (11.4, 16.2, "แต่ในจอมือถือ", "เงานั้นใกล้กว่าเดิม"),
-            (16.2, 20.0, "ข้อความสุดท้ายส่งมา", "“ไม่ต้องเปิดแล้ว”"),
-            (20.0, 22.0, "“เราเข้ามาแล้ว”", "คืนนี้อย่าหันไปมองกระจก"),
-        ],
-        # Only beat 4 puts the incoming message in `sub`; the others are narration.
-        "phone_beats": [4],
-        "phone_context": ("ไม่ทราบชื่อ", "อย่ามองกระจก"),
-        "caption": "ผมไม่เห็นใครหน้าห้อง แต่กระจกเห็น ตอนจบคือไม่โอเคเลย",
-    },
-]
+EPISODES = []
+
+
+def load_episodes(story_path: str, series_id: str, hook: str = "") -> tuple:
+    """Beats come from the selected series, so a rerun renders what the plan says."""
+    config = json.loads(Path(story_path).read_text(encoding="utf-8"))
+    series_list = config.get("series", [])
+    series = next((item for item in series_list if item.get("id") == series_id), None) if series_id else (series_list[0] if series_list else None)
+    if not series:
+        raise SystemExit(f"ไม่พบ series `{series_id}` ใน {story_path}")
+    render_beats = series.get("render_beats") or []
+    if not render_beats:
+        raise SystemExit(
+            f"series `{series['id']}` ยังไม่มี `render_beats` ใน {story_path}\n"
+            f"renderer วาดข้อความตามบีทที่กำหนดไว้ในไฟล์นั้น ให้เพิ่มก่อนถึงจะเรนเดอร์ได้"
+        )
+    episodes = []
+    for item in render_beats:
+        beats = [(as_seconds(beat["start"]), as_seconds(beat["end"]), beat["title"], beat["sub"])
+                 for beat in item.get("beats", [])]
+        if hook and beats:
+            first = beats[0]
+            beats[0] = (first[0], first[1], hook, first[3])
+        episodes.append({
+            "id": f"{series['id']}-ep{item.get('episode', len(episodes) + 1)}",
+            "title": item.get("title", ""),
+            "beats": beats,
+            "phone_beats": item.get("phone_beats", []),
+            "phone_context": tuple(item.get("phone_context") or ("ไม่ทราบชื่อ", "")),
+            "caption": item.get("caption", ""),
+        })
+    return series, episodes
+
+
+def as_seconds(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 FONT_CANDIDATES = [
@@ -177,6 +168,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--font", default="", help="ไฟล์ฟอนต์ภาษาไทยที่จะใช้ ถ้าไม่ใส่จะหาให้เอง.")
     parser.add_argument("--account", default=str(ROOT / "data" / "tiktok_account.json"), help="ไฟล์บัญชี TikTok ที่จะใช้ handle.")
     parser.add_argument("--handle", default="", help="ทับ handle ที่จะพิมพ์ลงบนคลิป.")
+    parser.add_argument("--story", default=str(ROOT / "data" / "story_series.json"), help="ไฟล์ series ที่มี render_beats.")
+    parser.add_argument("--series-id", default="room-407", help="series ที่จะเรนเดอร์.")
+    parser.add_argument("--hook", default="", help="hook ใหม่สำหรับรอบที่เปลี่ยน hook.")
     parser.add_argument("--frames-only", action="store_true", help="สร้างเฉพาะเฟรมกับเสียง ไม่ encode เป็น MP4.")
     return parser.parse_args()
 
@@ -374,8 +368,9 @@ def resolve_handle(account_path: str, override: str) -> str:
 
 
 def main() -> None:
-    global HANDLE
+    global HANDLE, EPISODES
     args = parse_args()
+    series, EPISODES = load_episodes(args.story, args.series_id, args.hook.strip())
     HANDLE = resolve_handle(args.account, args.handle)
     load_fonts(args.font)
     out_dir = Path(args.out)

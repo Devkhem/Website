@@ -454,7 +454,10 @@ def main() -> None:
                 f"มีผลวัด {len(tied)} แถวของ episode {latest_posted} ที่วันที่และเวลาเท่ากัน\n"
                 "เติมคอลัมน์ measured_at (เช่น 14:30) หรือลบแถวที่ซ้ำออก แล้วรันใหม่"
             )
-    decision_key, decision = decision_from_metrics(config, deciding_rows)
+    if ambiguous_metric:
+        decision_key, decision = "indeterminate", "ยังตัดสินใจไม่ได้ เพราะผลวัดล่าสุดมีหลายแถวที่แยกไม่ออกว่าอันไหนใหม่กว่า"
+    else:
+        decision_key, decision = decision_from_metrics(config, deciding_rows)
     target_episode = latest_posted or latest_episode_number(deciding_rows)
     exhausted = decision_key != "kill" and not [
         item for item in series.get("episodes", []) if int(item.get("episode", 0)) not in posted
